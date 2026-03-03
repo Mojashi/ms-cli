@@ -2,8 +2,6 @@
 
 Microsoft Teams チャット・Outlook メール・カレンダーをターミナルから操作する CLI ツール。
 
-Graph API が使えない環境向けに、Teams / Outlook 内部 API を利用しています。macOS 専用。
-
 ## 機能
 
 - **Teams チャット** — 一覧・閲覧・送信・既読マーク
