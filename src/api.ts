@@ -1,4 +1,5 @@
 import { loadConfig, type Config } from "./config.js";
+import { shortId, registerIds } from "./id-map.js";
 
 // --- ANSI colors ---
 const c = {
@@ -223,6 +224,8 @@ interface Message {
   from?: string;
   composetime?: string;
   originalarrivaltime?: string;
+  rootMessageId?: string;
+  properties?: Record<string, unknown>;
 }
 
 interface MessagesResponse {
@@ -258,6 +261,19 @@ export async function chatRead(
   // Reverse to show oldest first
   const messages = [...data.messages].reverse();
 
+  // Register message IDs for short ID resolution
+  const rootIds = messages.filter((m) => !m.rootMessageId || m.rootMessageId === m.id).map((m) => m.id);
+  if (rootIds.length > 0) registerIds(rootIds);
+
+  // Count replies per rootMessageId for thread info
+  const threadCounts = new Map<string, number>();
+  for (const msg of messages) {
+    const root = msg.rootMessageId;
+    if (root && root !== msg.id) {
+      threadCounts.set(root, (threadCounts.get(root) ?? 0) + 1);
+    }
+  }
+
   for (const msg of messages) {
     // Skip system/event messages unless they have useful content
     if (
@@ -276,7 +292,16 @@ export async function chatRead(
     try { isNew = BigInt(msg.id) > myHorizon; } catch { }
 
     const newTag = isNew ? `${c.red}${c.bold}[NEW]${c.reset} ` : "";
-    console.log(`  ${c.dim}[${time}]${c.reset} ${newTag}${c.green}${c.bold}${sender}${c.reset}: ${content}`);
+
+    // Thread info: show reply count for root messages, indent for replies
+    const isRoot = !msg.rootMessageId || msg.rootMessageId === msg.id;
+    const replyCount = isRoot ? (threadCounts.get(msg.id) ?? 0) : 0;
+    const threadTag = replyCount > 0 ? ` ${c.cyan}[${replyCount} replies]${c.reset}` : "";
+    const indent = isRoot ? "  " : "    ";
+    const replyPrefix = isRoot ? "" : `${c.dim}↳${c.reset} `;
+    const msgIdTag = isRoot ? `${c.yellow}${shortId(msg.id)}${c.reset} ` : "";
+
+    console.log(`${indent}${msgIdTag}${c.dim}[${time}]${c.reset} ${newTag}${replyPrefix}${c.green}${c.bold}${sender}${c.reset}: ${content}${threadTag}`);
   }
 
   const newCount = messages.filter((m) => {
@@ -331,6 +356,63 @@ export async function chatMarkRead(conversationId: string): Promise<void> {
   );
 
   console.log(`Marked as read up to message ${latestId}.`);
+}
+
+// --- Chat Thread ---
+
+export async function chatThread(
+  conversationId: string,
+  rootMessageId: string,
+  options: { limit?: number; json?: boolean }
+): Promise<void> {
+  // Fetch enough messages to find the thread
+  const pageSize = options.limit ?? 200;
+  const data = (await apiGet(
+    `/users/ME/conversations/${encodeURIComponent(conversationId)}/messages?view=msnp24Equivalent&pageSize=${pageSize}`
+  )) as MessagesResponse;
+
+  const thread = data.messages.filter((m) => m.rootMessageId === rootMessageId);
+
+  if (thread.length === 0) {
+    console.error("Thread not found. The message may be too old or the ID is incorrect.");
+    process.exit(1);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(thread, null, 2));
+    return;
+  }
+
+  // Show oldest first
+  const sorted = [...thread].sort((a, b) => {
+    try { return Number(BigInt(a.id) - BigInt(b.id)); } catch { return 0; }
+  });
+
+  // First message is the root — show its subject if available
+  const root = sorted[0];
+  const subject = (root.properties as Record<string, unknown>)?.subject as string | undefined;
+  if (subject) {
+    console.log(`${c.bold}${c.cyan}── ${subject} ──${c.reset}\n`);
+  }
+
+  for (const msg of sorted) {
+    if (
+      msg.messagetype.startsWith("ThreadActivity/") ||
+      msg.messagetype === "Event/Call"
+    ) {
+      continue;
+    }
+
+    const sender = msg.imdisplayname ?? extractUserId(msg.from) ?? "system";
+    const time = formatTime(msg.originalarrivaltime ?? "");
+    const content = stripHtml(msg.content ?? "");
+    const isRoot = msg.id === rootMessageId;
+    const indent = isRoot ? "" : "  ";
+
+    console.log(`${indent}${c.dim}[${time}]${c.reset} ${c.green}${c.bold}${sender}${c.reset}: ${content}`);
+  }
+
+  console.log(`\n${sorted.length} messages in thread`);
 }
 
 // --- Helpers ---

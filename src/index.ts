@@ -1,6 +1,6 @@
 import { program } from "commander";
 import { tokenStatus, refresh, isTokenValid, tryRefresh, deviceCodeLogin } from "./auth.js";
-import { chatList, chatRead, chatSend, chatMarkRead } from "./api.js";
+import { chatList, chatRead, chatSend, chatMarkRead, chatThread } from "./api.js";
 import { mailList, mailRead, mailSearch, mailDraft, mailSend, mailCompose, mailReply, mailOpen, mailAttachments, calendarList, calendarRead, calendarToday, calendarSchedule, calendarFindSlot } from "./outlook-api.js";
 import { requireTouchId } from "./touchid.js";
 import { resolveId } from "./id-map.js";
@@ -73,6 +73,16 @@ chat
     requireTouchId("ms-cli: Teams メッセージ送信");
     await ensureToken();
     await chatSend(id, message);
+  });
+
+chat
+  .command("thread <conversationId> <messageId>")
+  .description("Read a thread (reply chain) in a channel")
+  .option("-n, --limit <n>", "Max messages to scan", "200")
+  .option("--json", "Output raw JSON")
+  .action(async (conversationId: string, messageId: string, opts) => {
+    await ensureToken();
+    await chatThread(conversationId, resolveId(messageId), { limit: parseInt(opts.limit), json: opts.json });
   });
 
 chat
