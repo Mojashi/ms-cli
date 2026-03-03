@@ -1,0 +1,19 @@
+{
+  "name": "ms-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "ms-cli": "./bin/ms-cli.mjs"
+  },
+  "scripts": {
+    "cli": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
