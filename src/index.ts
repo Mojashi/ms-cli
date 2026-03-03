@@ -261,4 +261,29 @@ cal
     });
   });
 
+// --- update ---
+program
+  .command("update")
+  .description("Self-update to the latest release")
+  .action(async () => {
+    const arch = process.arch === "arm64" ? "arm64" : "x64";
+    const asset = `ms-cli-darwin-${arch}`;
+    const url = `https://github.com/Mojashi/ms-cli/releases/latest/download/${asset}`;
+    const self = process.execPath;
+
+    console.log(`Downloading ${asset}...`);
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) {
+      console.error(`Download failed: ${res.status}`);
+      process.exit(1);
+    }
+
+    const tmpPath = `${self}.tmp`;
+    const { writeFileSync, renameSync, chmodSync } = await import("fs");
+    writeFileSync(tmpPath, Buffer.from(await res.arrayBuffer()));
+    chmodSync(tmpPath, 0o755);
+    renameSync(tmpPath, self);
+    console.log("Updated successfully.");
+  });
+
 program.parse();
