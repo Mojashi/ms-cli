@@ -265,11 +265,28 @@ cal
 program
   .command("update")
   .description("Self-update to the latest release")
-  .action(async () => {
+  .option("--path <path>", "Path to the binary to update (default: auto-detect)")
+  .action(async (opts) => {
+    const { realpathSync, writeFileSync, renameSync, chmodSync } = await import("fs");
     const arch = process.arch === "arm64" ? "arm64" : "x64";
     const asset = `ms-cli-darwin-${arch}`;
     const url = `https://github.com/Mojashi/ms-cli/releases/latest/download/${asset}`;
-    const self = process.execPath;
+
+    // Detect the binary path: explicit flag > argv[1] for bun-compiled > which ms-cli
+    let self: string;
+    if (opts.path) {
+      self = realpathSync(opts.path);
+    } else {
+      // For bun-compiled binaries, execPath IS the binary
+      // For tsx/node, we need to find the actual installed binary
+      const { execSync } = await import("child_process");
+      try {
+        self = realpathSync(execSync("which ms-cli", { encoding: "utf-8" }).trim());
+      } catch {
+        console.error("Cannot detect ms-cli binary path. Use --path to specify.");
+        process.exit(1);
+      }
+    }
 
     console.log(`Downloading ${asset}...`);
     const res = await fetch(url, { redirect: "follow" });
@@ -279,11 +296,10 @@ program
     }
 
     const tmpPath = `${self}.tmp`;
-    const { writeFileSync, renameSync, chmodSync } = await import("fs");
     writeFileSync(tmpPath, Buffer.from(await res.arrayBuffer()));
     chmodSync(tmpPath, 0o755);
     renameSync(tmpPath, self);
-    console.log("Updated successfully.");
+    console.log(`Updated: ${self}`);
   });
 
 program.parse();
