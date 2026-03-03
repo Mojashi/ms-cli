@@ -4,6 +4,7 @@ import { join } from "path";
 import { loadConfig, saveConfig, type Config } from "./config.js";
 import { shortId, registerIds } from "./id-map.js";
 
+const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"; // Microsoft Teams native client
 const OUTLOOK_BASE = "https://outlook.office.com/api/v2.0/me";
 
 // --- ANSI colors ---
@@ -42,11 +43,6 @@ async function ensureOutlookToken(): Promise<string> {
     process.exit(1);
   }
 
-  if (!config.clientId) {
-    console.error("No clientId configured. Set it in ~/.ms-cli/config.json");
-    process.exit(1);
-  }
-
   console.error("Refreshing Outlook token...");
   const tenantId = config.tenantId ?? "common";
   const res = await fetch(
@@ -58,7 +54,7 @@ async function ensureOutlookToken(): Promise<string> {
         Origin: "https://teams.microsoft.com",
       },
       body: new URLSearchParams({
-        client_id: config.clientId,
+        client_id: TEAMS_CLIENT_ID,
         grant_type: "refresh_token",
         refresh_token: config.refreshToken,
         scope: "https://outlook.office.com/.default openid profile offline_access",

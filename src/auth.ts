@@ -1,4 +1,3 @@
-import { createInterface } from "readline/promises";
 import { loadConfig, saveConfig, getConfigPath } from "./config.js";
 
 interface JwtPayload {
@@ -104,13 +103,7 @@ export function login(skypeToken: string, refreshToken?: string): void {
   tokenStatus();
 }
 
-function getClientId(config: { clientId?: string }): string {
-  if (!config.clientId) {
-    console.error("No clientId configured. Set it in ~/.ms-cli/config.json");
-    process.exit(1);
-  }
-  return config.clientId;
-}
+const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"; // Microsoft Teams native client
 
 /** Try to refresh skypetoken using saved refresh token. Returns true on success. */
 export async function tryRefresh(quiet = false): Promise<boolean> {
@@ -119,7 +112,7 @@ export async function tryRefresh(quiet = false): Promise<boolean> {
     if (!quiet) console.error("No refresh token saved. Run: ms-cli auth login");
     return false;
   }
-  const clientId = getClientId(config);
+  const clientId = TEAMS_CLIENT_ID;
 
   const tenantId = config.tenantId ?? "common";
 
@@ -212,7 +205,7 @@ export async function refresh(): Promise<void> {
 /** Device code flow: get refresh token interactively via browser auth */
 export async function deviceCodeLogin(): Promise<void> {
   const config = loadConfig();
-  const clientId = getClientId(config);
+  const clientId = TEAMS_CLIENT_ID;
   const tenantId = config.tenantId ?? "common";
 
   // Step 1: Request device code
@@ -330,23 +323,3 @@ export async function deviceCodeLogin(): Promise<void> {
   process.exit(1);
 }
 
-/** Interactive setup: configure clientId and run device code login */
-export async function setup(): Promise<void> {
-  const config = loadConfig();
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const clientId = await rl.question("Client ID: ");
-    if (!clientId.trim()) {
-      console.error("Client ID is required.");
-      process.exit(1);
-    }
-    config.clientId = clientId.trim();
-    saveConfig(config);
-    console.log("Client ID saved.\n");
-  } finally {
-    rl.close();
-  }
-
-  await deviceCodeLogin();
-}

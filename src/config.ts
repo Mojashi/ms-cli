@@ -10,7 +10,6 @@ export interface Config {
   refreshToken?: string;
   refreshTokenIssuedAt?: number; // unix timestamp (seconds)
   outlookToken?: string;
-  clientId?: string; // OAuth client ID (e.g. Teams Web Client app ID)
   tenantId?: string;
   region?: string; // e.g. "jp"
   chatServiceHost?: string;

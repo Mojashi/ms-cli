@@ -1,5 +1,5 @@
 import { program } from "commander";
-import { tokenStatus, refresh, isTokenValid, tryRefresh, deviceCodeLogin, setup } from "./auth.js";
+import { tokenStatus, refresh, isTokenValid, tryRefresh, deviceCodeLogin } from "./auth.js";
 import { chatList, chatRead, chatSend, chatMarkRead } from "./api.js";
 import { mailList, mailRead, mailSearch, mailDraft, mailSend, mailCompose, mailReply, mailOpen, mailAttachments, calendarList, calendarRead, calendarToday, calendarSchedule, calendarFindSlot } from "./outlook-api.js";
 import { requireTouchId } from "./touchid.js";
@@ -20,13 +20,6 @@ program.name("ms-cli").description("Teams Internal API CLI").version("0.1.0");
 
 // --- auth ---
 const auth = program.command("auth").description("Token management");
-
-auth
-  .command("setup")
-  .description("Initial setup: configure client ID and login")
-  .action(async () => {
-    await setup();
-  });
 
 auth
   .command("login")

@@ -38,23 +38,11 @@ mv ms-cli /usr/local/bin/
 
 ## セットアップ
 
-### 1. Client ID を取得
-
-Teams Web Client が使用している OAuth Client ID をブラウザから取得します。
-
-1. [teams.microsoft.com](https://teams.microsoft.com) にログイン
-2. DevTools を開く (F12)
-3. **Application** → **Local Storage** → `https://teams.microsoft.com`
-4. キー名に `client_id` を含む MSAL 関連エントリを探す（例: `login.microsoftonline.com-...`のキー内の JSON）
-5. `client_id` の値（UUID 形式）をコピー
-
-### 2. セットアップ & ログイン
-
 ```bash
-ms-cli auth setup
+ms-cli auth login
 ```
 
-Client ID の入力を求められるので、上で取得した値を貼り付けます。続けて Device Code Flow でブラウザ認証が始まります。
+Device Code Flow でブラウザ認証を行います。表示されるURLを開いてコードを入力するだけです。
 
 トークンは `~/.ms-cli/config.json` に保存されます。
 
@@ -102,7 +90,6 @@ ms-cli cal find-slot user1@example.com --duration 30
 
 | フィールド        | 説明                                             |
 | ----------------- | ------------------------------------------------ |
-| `clientId`        | OAuth アプリケーション ID (必須)                 |
 | `skypeToken`      | Teams 内部 JWT (ログイン時に自動設定)            |
 | `refreshToken`    | MSAL リフレッシュトークン (ログイン時に自動設定) |
 | `tenantId`        | Azure AD テナント ID (ログイン時に自動検出)      |

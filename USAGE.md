@@ -226,7 +226,6 @@ ms-cli mail draft --to tanaka@example.com -s "件名" -b "本文"
   "skypeToken": "eyJ...",
   "refreshToken": "1.AWs...",
   "outlookToken": "eyJ...",
-  "clientId": "<your-oauth-client-id>",
   "tenantId": "<your-tenant-id>",
   "region": "<region>",
   "chatServiceHost": "<region>.ng.msg.teams.microsoft.com"
