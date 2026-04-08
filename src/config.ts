@@ -10,6 +10,10 @@ export interface Config {
   refreshToken?: string;
   refreshTokenIssuedAt?: number; // unix timestamp (seconds)
   outlookToken?: string;
+  graphToken?: string;
+  formsToken?: string;
+  formsTokenExp?: number;
+  formsUserId?: string;
   tenantId?: string;
   region?: string; // e.g. "jp"
   chatServiceHost?: string;

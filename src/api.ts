@@ -192,8 +192,22 @@ export async function chatList(options: {
     const lastMsg = conv.lastMessage;
     const lastTime = conv.properties?.lastimreceivedtime ?? lastMsg?.originalarrivaltime ?? "";
     const sender = lastMsg?.imdisplayname ?? "";
-    const preview = stripHtml(lastMsg?.content ?? "").slice(0, 60);
+    const rawContent = lastMsg?.content ?? "";
+    const msgtype = lastMsg?.messagetype ?? "";
     const unread = isUnread(conv);
+
+    // Detect if last message is a reaction
+    const isReaction = msgtype === "MessageReaction" || msgtype === "Signal/Flamingo";
+    let preview: string;
+    if (isReaction) {
+      // Try to extract reaction key from content
+      const keyMatch = rawContent.match(/key="([^"]+)"/);
+      const emoji = keyMatch ? (reactionEmoji[keyMatch[1]] ?? keyMatch[1]) : "\u{1F44D}";
+      const textPreview = stripHtml(rawContent).slice(0, 40);
+      preview = `${c.dim}[reaction: ${emoji}]${c.reset}${textPreview ? ` on: "${textPreview}"` : ""}`;
+    } else {
+      preview = stripHtml(rawContent).slice(0, 60);
+    }
 
     const typeColor = type.includes("Channel") ? c.blue : type.includes("Meeting") ? c.magenta : c.cyan;
     const marker = unread ? ` ${c.bgRed}${c.white}${c.bold} UNREAD ${c.reset}` : "";
@@ -226,6 +240,90 @@ interface Message {
   originalarrivaltime?: string;
   rootMessageId?: string;
   properties?: Record<string, unknown>;
+  amsreferences?: string[];
+}
+
+// --- Reaction helpers ---
+
+/** Emoji map for Teams reaction keys */
+const reactionEmoji: Record<string, string> = {
+  like: "\u{1F44D}",
+  heart: "\u{2764}\u{FE0F}",
+  laugh: "\u{1F602}",
+  surprised: "\u{1F62E}",
+  sad: "\u{1F622}",
+  angry: "\u{1F620}",
+};
+
+interface EmotionEntry {
+  key: string;
+  users: { mri: string; time: string; value: string }[];
+}
+
+/** Check if a message is a reaction-only message (not a regular message that happens to have reactions) */
+function isReactionMessage(msg: Message): boolean {
+  if (msg.messagetype === "MessageReaction") return true;
+  // Some reaction notifications have messagetype "Signal/Flamingo" or contain emotion data
+  if (msg.messagetype === "Signal/Flamingo") return true;
+  // Check for content that is purely a reaction annotation (e.g. <e_m> tags only)
+  if (msg.content && /^<e_m\b[^>]*\/>$/.test(msg.content.trim())) return true;
+  // Note: messages with properties.emotions but normal messagetype (RichText/Html, Text)
+  // are regular messages that have reactions ON them -- handled by emotionsSummary() instead
+  return false;
+}
+
+/** Format a reaction message for display */
+function formatReaction(msg: Message): string | null {
+  const sender = msg.imdisplayname ?? extractUserId(msg.from) ?? "unknown";
+
+  // Try to parse emotions from properties
+  if (msg.properties?.emotions) {
+    try {
+      const emotions: EmotionEntry[] =
+        typeof msg.properties.emotions === "string"
+          ? JSON.parse(msg.properties.emotions)
+          : msg.properties.emotions as EmotionEntry[];
+      const reactionParts = emotions.map((e) => {
+        const emoji = reactionEmoji[e.key] ?? e.key;
+        return emoji;
+      });
+      if (reactionParts.length > 0) {
+        const contentPreview = stripHtml(msg.content ?? "").slice(0, 40);
+        const preview = contentPreview ? ` on: "${contentPreview}${contentPreview.length >= 40 ? "..." : ""}"` : "";
+        return `${c.dim}[reaction: ${reactionParts.join(" ")}]${c.reset}${preview}`;
+      }
+    } catch { /* fall through */ }
+  }
+
+  // For MessageReaction type, parse content
+  if (msg.messagetype === "MessageReaction" || msg.messagetype === "Signal/Flamingo") {
+    // Content may contain reaction key
+    const content = msg.content ?? "";
+    const keyMatch = content.match(/key="([^"]+)"/);
+    const emoji = keyMatch ? (reactionEmoji[keyMatch[1]] ?? keyMatch[1]) : "\u{1F44D}";
+    return `${c.dim}[reaction: ${emoji}] by ${sender}${c.reset}`;
+  }
+
+  return null;
+}
+
+/** Build a summary of emotions/reactions on a message from its properties */
+function emotionsSummary(msg: Message): string {
+  if (!msg.properties?.emotions) return "";
+  try {
+    const emotions: EmotionEntry[] =
+      typeof msg.properties.emotions === "string"
+        ? JSON.parse(msg.properties.emotions)
+        : msg.properties.emotions as EmotionEntry[];
+    const parts = emotions
+      .filter((e) => e.users && e.users.length > 0)
+      .map((e) => {
+        const emoji = reactionEmoji[e.key] ?? e.key;
+        return `${emoji}${e.users.length > 1 ? e.users.length : ""}`;
+      });
+    if (parts.length > 0) return ` ${c.dim}${parts.join(" ")}${c.reset}`;
+  } catch { /* ignore parse errors */ }
+  return "";
 }
 
 interface MessagesResponse {
@@ -285,6 +383,19 @@ export async function chatRead(
       continue;
     }
 
+    // Handle reaction messages distinctly
+    if (isReactionMessage(msg)) {
+      const time = formatTime(msg.originalarrivaltime ?? "");
+      const reactionText = formatReaction(msg);
+      if (reactionText) {
+        let isNew = false;
+        try { isNew = BigInt(msg.id) > myHorizon; } catch { }
+        const newTag = isNew ? `${c.red}${c.bold}[NEW]${c.reset} ` : "";
+        console.log(`  ${c.dim}[${time}]${c.reset} ${newTag}${reactionText}`);
+      }
+      continue;
+    }
+
     const sender = msg.imdisplayname ?? extractUserId(msg.from) ?? "system";
     const time = formatTime(msg.originalarrivaltime ?? "");
     const content = stripHtml(msg.content ?? "");
@@ -301,7 +412,10 @@ export async function chatRead(
     const replyPrefix = isRoot ? "" : `${c.dim}↳${c.reset} `;
     const msgIdTag = isRoot ? `${c.yellow}${shortId(msg.id)}${c.reset} ` : "";
 
-    console.log(`${indent}${msgIdTag}${c.dim}[${time}]${c.reset} ${newTag}${replyPrefix}${c.green}${c.bold}${sender}${c.reset}: ${content}${threadTag}`);
+    // Show reaction summary if this message has emotions
+    const reactions = emotionsSummary(msg);
+
+    console.log(`${indent}${msgIdTag}${c.dim}[${time}]${c.reset} ${newTag}${replyPrefix}${c.green}${c.bold}${sender}${c.reset}: ${content}${reactions}${threadTag}`);
   }
 
   const newCount = messages.filter((m) => {
@@ -403,13 +517,26 @@ export async function chatThread(
       continue;
     }
 
+    // Handle reaction messages distinctly in threads too
+    if (isReactionMessage(msg)) {
+      const time = formatTime(msg.originalarrivaltime ?? "");
+      const reactionText = formatReaction(msg);
+      if (reactionText) {
+        console.log(`  ${c.dim}[${time}]${c.reset} ${reactionText}`);
+      }
+      continue;
+    }
+
     const sender = msg.imdisplayname ?? extractUserId(msg.from) ?? "system";
     const time = formatTime(msg.originalarrivaltime ?? "");
     const content = stripHtml(msg.content ?? "");
     const isRoot = msg.id === rootMessageId;
     const indent = isRoot ? "" : "  ";
 
-    console.log(`${indent}${c.dim}[${time}]${c.reset} ${c.green}${c.bold}${sender}${c.reset}: ${content}`);
+    // Show reaction summary if this message has emotions
+    const reactions = emotionsSummary(msg);
+
+    console.log(`${indent}${c.dim}[${time}]${c.reset} ${c.green}${c.bold}${sender}${c.reset}: ${content}${reactions}`);
   }
 
   console.log(`\n${sorted.length} messages in thread`);

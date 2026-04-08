@@ -3,6 +3,7 @@ import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { loadConfig, saveConfig, type Config } from "./config.js";
 import { shortId, registerIds } from "./id-map.js";
+import { ensureGraphToken } from "./sharepoint-api.js";
 
 const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"; // Microsoft Teams native client
 const OUTLOOK_BASE = "https://outlook.office.com/api/v2.0/me";
@@ -109,6 +110,41 @@ async function outlookPost(path: string, body?: unknown): Promise<unknown> {
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Outlook API error ${res.status}: ${text.slice(0, 300)}`);
+  }
+  if (res.status === 202 || res.headers.get("content-length") === "0") return {};
+  return res.json();
+}
+
+// --- Graph API helpers ---
+
+const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+
+async function graphGet(path: string): Promise<unknown> {
+  const token = await ensureGraphToken();
+  const url = path.startsWith("http") ? path : `${GRAPH_BASE}${path}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Graph API error ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+async function graphPost(path: string, body?: unknown): Promise<unknown> {
+  const token = await ensureGraphToken();
+  const url = path.startsWith("http") ? path : `${GRAPH_BASE}${path}`;
+  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+  const init: RequestInit = { method: "POST", headers };
+  if (body) {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, init);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Graph API error ${res.status}: ${text.slice(0, 300)}`);
   }
   if (res.status === 202 || res.headers.get("content-length") === "0") return {};
   return res.json();
@@ -467,6 +503,58 @@ function parseRecipient(addr: string): { EmailAddress: { Address: string; Name?:
 
 // --- Calendar ---
 
+/** Fetch another user's calendar view, falling back to subscribed ICS calendar if user is external */
+async function getUserCalendarView(
+  email: string,
+  start: string,
+  end: string,
+  top: number
+): Promise<ODataResponse<CalendarEvent>> {
+  const select = "subject,start,end,location,organizer,isAllDay,showAs,responseStatus,isCancelled";
+  // Try Graph /users/{email} first (works for same-tenant users)
+  try {
+    const gdata = (await graphGet(
+      `/users/${encodeURIComponent(email)}/calendarView?startDateTime=${start}&endDateTime=${end}&$top=${top}&$select=${select}&$orderby=start/dateTime`
+    )) as { value: Array<Record<string, unknown>> };
+    return { value: gdata.value.map(normalizeCalendarEvent) };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("ErrorInvalidUser") && !msg.includes("404")) throw e;
+  }
+
+  // Fallback: find subscribed ICS calendar
+  const cal = await findSubscribedCalendar(email);
+  if (!cal) {
+    throw new Error(`ユーザー '${email}' が見つかりません（外部テナント、かつ購読カレンダーもありません）`);
+  }
+  console.error(`${c.dim}${email}: 購読カレンダー「${cal.name}」から取得${c.reset}`);
+  const gdata = (await graphGet(
+    `/me/calendars/${cal.id}/calendarView?startDateTime=${start}&endDateTime=${end}&$top=${top}&$select=${select}&$orderby=start/dateTime`
+  )) as { value: Array<Record<string, unknown>> };
+  return { value: gdata.value.map(normalizeCalendarEvent) };
+}
+
+/** Normalize Graph API camelCase response to Outlook PascalCase CalendarEvent */
+function normalizeCalendarEvent(ev: Record<string, unknown>): CalendarEvent {
+  const start = ev.start as { dateTime: string; timeZone: string } | undefined;
+  const end = ev.end as { dateTime: string; timeZone: string } | undefined;
+  const loc = ev.location as { displayName?: string } | undefined;
+  const org = ev.organizer as { emailAddress?: { name: string; address: string } } | undefined;
+  const resp = ev.responseStatus as { response: string } | undefined;
+  return {
+    Id: (ev.id as string) ?? "",
+    Subject: (ev.subject as string) ?? "",
+    Start: { DateTime: start?.dateTime ?? "", TimeZone: start?.timeZone ?? "" },
+    End: { DateTime: end?.dateTime ?? "", TimeZone: end?.timeZone ?? "" },
+    Location: loc ? { DisplayName: loc.displayName } : undefined,
+    Organizer: org?.emailAddress ? { EmailAddress: { Name: org.emailAddress.name, Address: org.emailAddress.address } } : undefined,
+    IsAllDay: (ev.isAllDay as boolean) ?? false,
+    ShowAs: ev.showAs as string | undefined,
+    ResponseStatus: resp ? { Response: resp.response } : undefined,
+    IsCancelled: (ev.isCancelled as boolean) ?? false,
+  };
+}
+
 interface CalendarEvent {
   Id: string;
   Subject: string;
@@ -490,6 +578,7 @@ interface CalendarEvent {
 export async function calendarList(options: {
   days?: number;
   pageSize?: number;
+  user?: string;
 }): Promise<void> {
   const days = options.days ?? 7;
   const pageSize = options.pageSize ?? 30;
@@ -497,9 +586,14 @@ export async function calendarList(options: {
   const start = now.toISOString();
   const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000).toISOString();
 
-  const data = (await outlookGet(
-    `/calendarview?startDateTime=${start}&endDateTime=${end}&$top=${pageSize}&$select=Subject,Start,End,Location,Organizer,IsAllDay,ShowAs,ResponseStatus,IsCancelled&$orderby=Start/DateTime`
-  )) as ODataResponse<CalendarEvent>;
+  let data: ODataResponse<CalendarEvent>;
+  if (options.user) {
+    data = await getUserCalendarView(options.user, start, end, pageSize);
+  } else {
+    data = (await outlookGet(
+      `/calendarview?startDateTime=${start}&endDateTime=${end}&$top=${pageSize}&$select=Subject,Start,End,Location,Organizer,IsAllDay,ShowAs,ResponseStatus,IsCancelled&$orderby=Start/DateTime`
+    )) as ODataResponse<CalendarEvent>;
+  }
 
   let currentDate = "";
   for (const ev of data.value) {
@@ -528,7 +622,10 @@ export async function calendarList(options: {
     console.log(`  ${statusTag} ${timeStr}  ${cancelled}${ev.Subject}${c.reset}${loc}${org}`);
   }
 
-  console.log(`\n${c.bold}${data.value.length}${c.reset} events (next ${days} days)`);
+  if (options.user) {
+    console.log(`\n${c.dim}(${options.user} の予定)${c.reset}`);
+  }
+  console.log(`${c.bold}${data.value.length}${c.reset} events (next ${days} days)`);
 }
 
 export async function calendarRead(
@@ -588,19 +685,25 @@ export async function calendarRead(
   }
 }
 
-export async function calendarToday(): Promise<void> {
+export async function calendarToday(options?: { user?: string }): Promise<void> {
   const now = new Date();
   const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
   const start = startOfDay.toISOString();
   const end = endOfDay.toISOString();
 
-  const raw = (await outlookGet(
-    `/calendarview?startDateTime=${start}&endDateTime=${end}&$top=50&$select=Subject,Start,End,Location,Organizer,IsAllDay,ShowAs,IsCancelled&$orderby=Start/DateTime`
-  )) as ODataResponse<CalendarEvent>;
+  let raw: ODataResponse<CalendarEvent>;
+  if (options?.user) {
+    raw = await getUserCalendarView(options.user, start, end, 50);
+  } else {
+    raw = (await outlookGet(
+      `/calendarview?startDateTime=${start}&endDateTime=${end}&$top=50&$select=Subject,Start,End,Location,Organizer,IsAllDay,ShowAs,IsCancelled&$orderby=Start/DateTime`
+    )) as ODataResponse<CalendarEvent>;
+  }
   const data = { value: raw.value.filter((ev) => !ev.IsCancelled) };
 
-  console.log(`${c.bold}${c.cyan}── 今日の予定 (${now.toLocaleDateString("ja-JP", { month: "2-digit", day: "2-digit", weekday: "short" })}) ──${c.reset}`);
+  const userLabel = options?.user ? ` [${options.user}]` : "";
+  console.log(`${c.bold}${c.cyan}── 今日の予定 (${now.toLocaleDateString("ja-JP", { month: "2-digit", day: "2-digit", weekday: "short" })})${userLabel} ──${c.reset}`);
 
   if (data.value.length === 0) {
     console.log(`  ${c.dim}予定なし${c.reset}`);
@@ -631,22 +734,109 @@ export async function calendarToday(): Promise<void> {
 // --- Schedule / Find Slot ---
 
 interface ScheduleItem {
-  Status: string;
-  Subject?: string;
-  Start: { DateTime: string; TimeZone: string };
-  End: { DateTime: string; TimeZone: string };
+  status: string;
+  subject?: string;
+  start: { dateTime: string; timeZone: string };
+  end: { dateTime: string; timeZone: string };
 }
 
 interface ScheduleInfo {
-  ScheduleId: string;
-  AvailabilityView: string;
-  ScheduleItems: ScheduleItem[];
-  WorkingHours?: {
-    DaysOfWeek: string[];
-    StartTime: string;
-    EndTime: string;
+  scheduleId: string;
+  availabilityView: string;
+  scheduleItems: ScheduleItem[];
+  workingHours?: {
+    daysOfWeek: string[];
+    startTime: string;
+    endTime: string;
+  };
+  error?: {
+    responseCode: string;
+    message: string;
   };
 }
+
+/** Search user's subscribed calendars for one matching the email (ICS / shared) */
+async function findSubscribedCalendar(
+  email: string
+): Promise<{ id: string; name: string } | null> {
+  const localPart = email.split("@")[0].toLowerCase();
+  try {
+    const cals = (await graphGet(
+      `/me/calendars?$top=100&$select=id,name,owner`
+    )) as { value: Array<{ id: string; name: string; owner?: { address?: string; name?: string } }> };
+
+    for (const cal of cals.value) {
+      // Match by owner email
+      if (cal.owner?.address?.toLowerCase() === email.toLowerCase()) {
+        return { id: cal.id, name: cal.name };
+      }
+      // Match by calendar name containing the local part (e.g. "ANDO RYUICHI-TOKB042")
+      const nameLower = cal.name.toLowerCase().replace(/[\s-]+/g, "");
+      const searchPart = localPart.replace(/-/g, "");
+      if (nameLower.includes(searchPart) && cal.name !== "Calendar") {
+        return { id: cal.id, name: cal.name };
+      }
+    }
+  } catch {}
+  return null;
+}
+
+/** Build ScheduleInfo from calendarView events (fallback for ICS calendars) */
+async function scheduleFromCalendarView(
+  calendarId: string,
+  calendarName: string,
+  email: string,
+  startDt: string,
+  endDt: string,
+  interval: number
+): Promise<ScheduleInfo> {
+  // Parse start/end as Asia/Tokyo
+  const startMs = new Date(startDt + "+09:00").getTime();
+  const endMs = new Date(endDt + "+09:00").getTime();
+  const totalSlots = Math.floor((endMs - startMs) / (interval * 60 * 1000));
+
+  const events = (await graphGet(
+    `/me/calendars/${calendarId}/calendarView?startDateTime=${new Date(startMs).toISOString()}&endDateTime=${new Date(endMs).toISOString()}&$top=100&$select=subject,start,end,showAs,isAllDay,isCancelled&$orderby=start/dateTime`
+  )) as { value: Array<{ subject?: string; start: { dateTime: string; timeZone: string }; end: { dateTime: string; timeZone: string }; showAs?: string; isCancelled?: boolean }> };
+
+  // Build availability view (0=free, 1=tentative, 2=busy, 3=oof)
+  const slots = new Array(totalSlots).fill(0);
+  const items: ScheduleItem[] = [];
+
+  for (const ev of events.value) {
+    if (ev.isCancelled) continue;
+    const showAs = (ev.showAs ?? "busy").toLowerCase();
+    if (showAs === "free") continue;
+
+    const evStart = new Date(ev.start.dateTime + "Z").getTime();
+    const evEnd = new Date(ev.end.dateTime + "Z").getTime();
+    const statusCode = showAs === "tentative" ? 1 : showAs === "oof" ? 3 : 2;
+
+    for (let i = 0; i < totalSlots; i++) {
+      const slotStart = startMs + i * interval * 60 * 1000;
+      const slotEnd = slotStart + interval * 60 * 1000;
+      if (evStart < slotEnd && evEnd > slotStart) {
+        slots[i] = Math.max(slots[i], statusCode);
+      }
+    }
+
+    items.push({
+      status: showAs,
+      subject: ev.subject,
+      start: ev.start,
+      end: ev.end,
+    });
+  }
+
+  return {
+    scheduleId: email,
+    availabilityView: slots.join(""),
+    scheduleItems: items,
+  };
+}
+
+// Cache: email → subscribed calendar (persists across calls within one process)
+const icsCalendarCache = new Map<string, { id: string; name: string } | null>();
 
 async function getSchedule(
   emails: string[],
@@ -654,13 +844,72 @@ async function getSchedule(
   endDt: string,
   interval: number = 30
 ): Promise<ScheduleInfo[]> {
-  const data = (await outlookPost("/calendar/getSchedule", {
-    Schedules: emails,
-    StartTime: { DateTime: startDt, TimeZone: "Asia/Tokyo" },
-    EndTime: { DateTime: endDt, TimeZone: "Asia/Tokyo" },
-    AvailabilityViewInterval: interval,
-  })) as { value: ScheduleInfo[] };
-  return data.value;
+  // Split emails into ones we can query via getSchedule vs known ICS-only
+  const graphEmails = emails.filter((e) => !icsCalendarCache.has(e));
+  const icsEmails = emails.filter((e) => icsCalendarCache.has(e));
+
+  // Query getSchedule for non-cached emails (skip if all are ICS)
+  const results = new Map<string, ScheduleInfo>();
+  if (graphEmails.length > 0) {
+    const data = (await graphPost("/me/calendar/getSchedule", {
+      schedules: graphEmails,
+      startTime: { dateTime: startDt, timeZone: "Asia/Tokyo" },
+      endTime: { dateTime: endDt, timeZone: "Asia/Tokyo" },
+      availabilityViewInterval: interval,
+    })) as { value: ScheduleInfo[] };
+
+    for (const sched of data.value) {
+      if (!sched.error) {
+        results.set(sched.scheduleId, sched);
+        continue;
+      }
+
+      // First-time error: try ICS fallback and cache result
+      const cal = await findSubscribedCalendar(sched.scheduleId);
+      icsCalendarCache.set(sched.scheduleId, cal);
+      if (cal) {
+        console.error(
+          `${c.dim}${sched.scheduleId}: 購読カレンダー「${cal.name}」から取得${c.reset}`
+        );
+        try {
+          results.set(sched.scheduleId, await scheduleFromCalendarView(
+            cal.id, cal.name, sched.scheduleId, startDt, endDt, interval
+          ));
+          continue;
+        } catch (e) {
+          console.error(`${c.red}[Error]${c.reset} カレンダー「${cal.name}」の取得に失敗: ${e}`);
+        }
+      }
+      // No fallback
+      console.error(
+        `${c.red}[Error]${c.reset} ${sched.scheduleId}: ${sched.error.message ?? sched.error.responseCode}`
+      );
+      results.set(sched.scheduleId, sched);
+    }
+  }
+
+  // Fetch ICS-cached emails directly (no getSchedule call)
+  for (const email of icsEmails) {
+    const cal = icsCalendarCache.get(email);
+    if (cal) {
+      try {
+        results.set(email, await scheduleFromCalendarView(
+          cal.id, cal.name, email, startDt, endDt, interval
+        ));
+        continue;
+      } catch (e) {
+        console.error(`${c.red}[Error]${c.reset} カレンダー「${cal.name}」の取得に失敗: ${e}`);
+      }
+    }
+    // Cached as null = no fallback available
+    results.set(email, {
+      scheduleId: email, availabilityView: "", scheduleItems: [],
+      error: { responseCode: "NoCalendar", message: "購読カレンダーが見つかりません" },
+    });
+  }
+
+  // Return in original email order
+  return emails.map((e) => results.get(e)!);
 }
 
 export async function calendarSchedule(options: {
@@ -697,8 +946,12 @@ export async function calendarSchedule(options: {
   console.log(`${c.dim}${ruler}${c.reset}`);
 
   for (const sched of schedules) {
-    const name = sched.ScheduleId.split("@")[0].padEnd(25);
-    const view = sched.AvailabilityView.slice(0, totalSlots);
+    const name = sched.scheduleId.split("@")[0].padEnd(25);
+    if (sched.error) {
+      console.log(`${c.bold}${name}${c.reset} ${c.red}(エラー: ${sched.error.message ?? sched.error.responseCode})${c.reset}`);
+      continue;
+    }
+    const view = (sched.availabilityView ?? "").slice(0, totalSlots);
     let bar = "";
     for (const ch of view) {
       bar += statusChars[ch] ?? ch;
@@ -706,14 +959,14 @@ export async function calendarSchedule(options: {
     console.log(`${c.bold}${name}${c.reset} ${bar}`);
 
     // Show busy items
-    for (const item of sched.ScheduleItems) {
-      if (item.Status === "Free") continue;
-      const s = new Date(item.Start.DateTime + "Z");
-      const e = new Date(item.End.DateTime + "Z");
+    for (const item of (sched.scheduleItems ?? [])) {
+      if (item.status === "free") continue;
+      const s = new Date(item.start.dateTime + "Z");
+      const e = new Date(item.end.dateTime + "Z");
       const sTime = s.toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" });
       const eTime = e.toLocaleTimeString("ja-JP", { timeZone: "Asia/Tokyo", hour: "2-digit", minute: "2-digit" });
-      const statusColor = item.Status === "Busy" ? c.red : item.Status === "OOF" ? c.magenta : c.yellow;
-      console.log(`${c.dim}                          ${statusColor}[${item.Status}]${c.reset} ${sTime}-${eTime} ${item.Subject ?? "(private)"}${c.reset}`);
+      const statusColor = item.status === "busy" ? c.red : item.status === "oof" ? c.magenta : c.yellow;
+      console.log(`${c.dim}                          ${statusColor}[${item.status}]${c.reset} ${sTime}-${eTime} ${item.subject ?? "(private)"}${c.reset}`);
     }
   }
 
@@ -760,8 +1013,13 @@ export async function calendarFindSlot(options: {
     // Merge availability: a slot is free only if ALL users are free (0)
     const merged = new Array(totalSlots).fill(true);
     for (const sched of schedules) {
-      for (let i = 0; i < totalSlots && i < sched.AvailabilityView.length; i++) {
-        if (sched.AvailabilityView[i] !== "0") merged[i] = false;
+      if (sched.error || !sched.availabilityView) {
+        // Treat errored user as fully busy (cannot confirm availability)
+        merged.fill(false);
+        continue;
+      }
+      for (let i = 0; i < totalSlots && i < sched.availabilityView.length; i++) {
+        if (sched.availabilityView[i] !== "0") merged[i] = false;
       }
     }
 

@@ -2,6 +2,8 @@ import { program } from "commander";
 import { tokenStatus, refresh, isTokenValid, tryRefresh, deviceCodeLogin } from "./auth.js";
 import { chatList, chatRead, chatSend, chatMarkRead, chatThread } from "./api.js";
 import { mailList, mailRead, mailSearch, mailDraft, mailSend, mailCompose, mailReply, mailOpen, mailAttachments, calendarList, calendarRead, calendarToday, calendarSchedule, calendarFindSlot } from "./outlook-api.js";
+import { spSites, spDrives, spFiles, spDownload, spSearch, spRecent, spOpen, spUpload, spConvert, spDelete, spUploadConvert } from "./sharepoint-api.js";
+import { formsList, formsRead, formsResponses, formsGroup } from "./forms-api.js";
 import { requireTouchId } from "./touchid.js";
 import { resolveId } from "./id-map.js";
 
@@ -208,15 +210,17 @@ cal
   .description("List upcoming events")
   .option("-d, --days <n>", "Number of days ahead", "7")
   .option("-n, --page-size <n>", "Max events", "30")
+  .option("-u, --user <email>", "View another user's calendar")
   .action(async (opts) => {
-    await calendarList({ days: parseInt(opts.days), pageSize: parseInt(opts.pageSize) });
+    await calendarList({ days: parseInt(opts.days), pageSize: parseInt(opts.pageSize), user: opts.user });
   });
 
 cal
   .command("today")
   .description("Show today's schedule")
-  .action(async () => {
-    await calendarToday();
+  .option("-u, --user <email>", "View another user's calendar")
+  .action(async (opts) => {
+    await calendarToday({ user: opts.user });
   });
 
 cal
@@ -259,6 +263,154 @@ cal
       endHour: parseInt(opts.endHour),
       startDate: opts.startDate,
     });
+  });
+
+// --- forms ---
+const forms = program.command("forms").description("Microsoft Forms (unofficial API)");
+
+forms
+  .command("list")
+  .description("List your forms")
+  .option("-n, --page-size <n>", "Number of forms", "20")
+  .option("--json", "Output raw JSON")
+  .action(async (opts) => {
+    await ensureToken();
+    await formsList({ pageSize: parseInt(opts.pageSize), json: opts.json });
+  });
+
+forms
+  .command("read <formIdOrUrl>")
+  .description("Show form details and questions (accepts form ID or URL)")
+  .option("--owner <ownerId>", "Owner user ID (auto-resolved if omitted)")
+  .option("--json", "Output raw JSON")
+  .action(async (formIdOrUrl: string, opts) => {
+    await ensureToken();
+    await formsRead(formIdOrUrl, { owner: opts.owner, json: opts.json });
+  });
+
+forms
+  .command("responses <formIdOrUrl>")
+  .description("List form responses (accepts form ID or URL)")
+  .option("--owner <ownerId>", "Owner user ID (auto-resolved if omitted)")
+  .option("-n, --page-size <n>", "Number of responses", "20")
+  .option("--json", "Output raw JSON")
+  .action(async (formIdOrUrl: string, opts) => {
+    await ensureToken();
+    await formsResponses(formIdOrUrl, { owner: opts.owner, pageSize: parseInt(opts.pageSize), json: opts.json });
+  });
+
+forms
+  .command("group <groupId>")
+  .description("List forms in a Microsoft 365 group")
+  .option("-n, --page-size <n>", "Number of forms", "20")
+  .option("--json", "Output raw JSON")
+  .action(async (groupId: string, opts) => {
+    await ensureToken();
+    await formsGroup(groupId, { pageSize: parseInt(opts.pageSize), json: opts.json });
+  });
+
+// --- sharepoint ---
+const sp = program.command("sp").description("SharePoint operations");
+
+sp
+  .command("sites")
+  .description("Search / list SharePoint sites")
+  .option("-q, --query <query>", "Search query (default: all)")
+  .option("-n, --page-size <n>", "Number of results", "20")
+  .action(async (opts) => {
+    await ensureToken();
+    await spSites({ query: opts.query, pageSize: parseInt(opts.pageSize) });
+  });
+
+sp
+  .command("drives <siteId>")
+  .description("List document libraries (drives) in a site")
+  .action(async (siteId: string) => {
+    await ensureToken();
+    await spDrives(siteId);
+  });
+
+sp
+  .command("files <driveId>")
+  .description("List files in a drive")
+  .option("-p, --path <path>", "Folder path within drive")
+  .option("-n, --page-size <n>", "Number of items", "30")
+  .option("--json", "Output raw JSON")
+  .action(async (driveId: string, opts) => {
+    await ensureToken();
+    await spFiles(driveId, { path: opts.path, pageSize: parseInt(opts.pageSize), json: opts.json });
+  });
+
+sp
+  .command("download <driveId> <itemId>")
+  .description("Download a file")
+  .option("-o, --out-dir <dir>", "Output directory (default: current dir)")
+  .action(async (driveId: string, itemId: string, opts) => {
+    await ensureToken();
+    await spDownload(driveId, itemId, { outDir: opts.outDir });
+  });
+
+sp
+  .command("search <query>")
+  .description("Search files across SharePoint")
+  .option("-n, --page-size <n>", "Number of results", "15")
+  .action(async (query: string, opts) => {
+    await ensureToken();
+    await spSearch(query, { pageSize: parseInt(opts.pageSize) });
+  });
+
+sp
+  .command("recent")
+  .description("Show recently accessed files")
+  .option("-n, --page-size <n>", "Number of files", "20")
+  .action(async (opts) => {
+    await ensureToken();
+    await spRecent({ pageSize: parseInt(opts.pageSize) });
+  });
+
+sp
+  .command("open <driveId> <itemId>")
+  .description("Open a file in the browser")
+  .action(async (driveId: string, itemId: string) => {
+    await ensureToken();
+    await spOpen(driveId, itemId);
+  });
+
+sp
+  .command("upload <driveId> <localPath>")
+  .description("Upload a local file to a drive")
+  .option("-p, --remote-path <path>", "Remote filename/path (default: same as local)")
+  .action(async (driveId: string, localPath: string, opts) => {
+    await ensureToken();
+    await spUpload(driveId, localPath, { remotePath: opts.remotePath });
+  });
+
+sp
+  .command("convert <driveId> <itemId>")
+  .description("Download a file converted to another format (e.g. pptx→pdf)")
+  .option("-f, --format <fmt>", "Target format: pdf, html, jpg, png, glb", "pdf")
+  .option("-o, --out-dir <dir>", "Output directory (default: current dir)")
+  .action(async (driveId: string, itemId: string, opts) => {
+    await ensureToken();
+    await spConvert(driveId, itemId, { format: opts.format, outDir: opts.outDir });
+  });
+
+sp
+  .command("delete <driveId> <itemId>")
+  .description("Delete a file from a drive")
+  .action(async (driveId: string, itemId: string) => {
+    await ensureToken();
+    await spDelete(driveId, itemId);
+  });
+
+sp
+  .command("to-pdf <driveId> <localPath>")
+  .description("Upload a file, convert to PDF, download, and delete remote (one-shot)")
+  .option("-f, --format <fmt>", "Target format", "pdf")
+  .option("-o, --out-dir <dir>", "Output directory (default: current dir)")
+  .action(async (driveId: string, localPath: string, opts) => {
+    await ensureToken();
+    await spUploadConvert(driveId, localPath, { format: opts.format, outDir: opts.outDir });
   });
 
 // --- update ---
