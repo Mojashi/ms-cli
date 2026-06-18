@@ -1,4 +1,14 @@
-import { loadConfig, saveConfig, getConfigPath } from "./config.js";
+import {
+  loadConfig,
+  saveConfig,
+  getConfigPath,
+  saveAccount,
+  listAccounts,
+  useAccount,
+  removeAccount,
+  getCurrentAccountKey,
+  type Config,
+} from "./config.js";
 
 interface JwtPayload {
   iat?: number;
@@ -8,7 +18,22 @@ interface JwtPayload {
   rgn?: string;
   tid?: string;
   aud?: string;
+  upn?: string;
+  unique_name?: string;
   [key: string]: unknown;
+}
+
+/** Best-effort email/UPN for an account, decoded from whatever token is present. */
+function accountUpn(config: Config): string | undefined {
+  for (const tok of [config.outlookToken, config.graphToken, config.skypeToken]) {
+    if (!tok) continue;
+    try {
+      const p = decodeJwt(tok);
+      if (p.upn) return p.upn;
+      if (p.unique_name) return p.unique_name;
+    } catch {}
+  }
+  return undefined;
 }
 
 function decodeJwt(token: string): JwtPayload {
@@ -43,6 +68,8 @@ export function tokenStatus(): void {
     const exp = payload.exp ?? 0;
     const remaining = exp - now;
 
+    const acctKey = getCurrentAccountKey();
+    if (acctKey) console.log(`account:  ${acctKey}`);
     console.log(`skypeid:  ${payload.skypeid ?? "unknown"}`);
     console.log(`region:   ${payload.rgn ?? "unknown"}`);
     console.log(`tenant:   ${payload.tid ?? "unknown"}`);
@@ -105,6 +132,167 @@ export function login(skypeToken: string, refreshToken?: string): void {
 
 const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"; // Microsoft Teams native client
 
+const SPACES_SCOPE =
+  "https://api.spaces.skype.com/.default openid profile offline_access";
+const AUTHZ_ENDPOINTS = [
+  "https://teams.microsoft.com/api/authsvc/v1.0/authz",
+  "https://authsvc.teams.microsoft.com/v1.0/authz",
+];
+
+/** Get an api.spaces.skype.com AAD token from a config's refresh token. */
+async function getSpacesToken(config: Config): Promise<string | null> {
+  if (!config.refreshToken) return null;
+  const tenantId = config.tenantId ?? "common";
+  const clientId = config.clientId ?? TEAMS_CLIENT_ID;
+  const res = await fetch(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        grant_type: "refresh_token",
+        refresh_token: config.refreshToken,
+        scope: SPACES_SCOPE,
+      }),
+    }
+  );
+  if (!res.ok) return null;
+  return ((await res.json()) as { access_token?: string }).access_token ?? null;
+}
+
+export interface TenantInfo {
+  tenantId: string;
+  tenantName: string;
+  userType: string;
+}
+
+/** List all tenants (home + guest) the user can access, via the Teams MT API. */
+async function fetchTenantList(spacesToken: string): Promise<TenantInfo[]> {
+  for (const region of ["apac", "emea", "noam", "amer"]) {
+    try {
+      const r = await fetch(
+        `https://teams.microsoft.com/api/mt/${region}/beta/users/tenantsv2`,
+        { headers: { Authorization: `Bearer ${spacesToken}` } }
+      );
+      if (r.ok) {
+        const arr = (await r.json()) as Array<{
+          tenantId: string;
+          tenantName: string;
+          userType: string;
+        }>;
+        return arr.map((t) => ({
+          tenantId: t.tenantId,
+          tenantName: t.tenantName,
+          userType: t.userType,
+        }));
+      }
+    } catch {}
+  }
+  return [];
+}
+
+/** Mint a self-contained account config for a tenant, reusing a base refresh token. */
+async function buildTenantAccount(
+  base: Config,
+  tenantId: string
+): Promise<Config | null> {
+  if (!base.refreshToken) return null;
+  const clientId = base.clientId ?? TEAMS_CLIENT_ID;
+  const res = await fetch(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        grant_type: "refresh_token",
+        refresh_token: base.refreshToken,
+        scope: SPACES_SCOPE,
+      }),
+    }
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as { access_token: string; refresh_token?: string };
+  const cfg: Config = {
+    skypeToken: "",
+    clientId,
+    tenantId,
+    refreshToken: data.refresh_token ?? base.refreshToken,
+    refreshTokenIssuedAt: Math.floor(Date.now() / 1000),
+  };
+  for (const ep of AUTHZ_ENDPOINTS) {
+    try {
+      const r = await fetch(ep, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${data.access_token}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      if (r.ok) {
+        const j = (await r.json()) as { tokens?: { skypeToken?: string } };
+        if (j.tokens?.skypeToken) {
+          cfg.skypeToken = j.tokens.skypeToken;
+          try {
+            const p = decodeJwt(cfg.skypeToken);
+            if (p.rgn) {
+              cfg.region = p.rgn;
+              cfg.chatServiceHost = `${p.rgn}.ng.msg.teams.microsoft.com`;
+            }
+          } catch {}
+          break;
+        }
+      }
+    } catch {}
+  }
+  return cfg;
+}
+
+/** Discover all tenants for the current account and register any missing ones. */
+export async function syncTenants(): Promise<void> {
+  const base = loadConfig();
+  if (!base.refreshToken) {
+    console.error("Not logged in. Run: ms-cli auth login");
+    process.exit(1);
+  }
+  const spaces = await getSpacesToken(base);
+  if (!spaces) {
+    console.error("Could not obtain a token for tenant discovery.");
+    process.exit(1);
+  }
+  const tenants = await fetchTenantList(spaces);
+  if (tenants.length === 0) {
+    console.error("No tenants discovered (API returned none).");
+    return;
+  }
+  console.log(`Discovered ${tenants.length} tenant(s):`);
+  for (const t of tenants) {
+    const existing = listAccounts().find((a) => a.config.tenantId === t.tenantId);
+    if (existing) {
+      // Backfill the friendly tenant name / user type onto existing accounts.
+      if (existing.config.tenantName !== t.tenantName || existing.config.userType !== t.userType) {
+        saveAccount(existing.key, { ...existing.config, tenantName: t.tenantName, userType: t.userType }, false);
+      }
+      console.log(`  = ${t.tenantName} [${t.userType}] — already registered as "${existing.key}"`);
+      continue;
+    }
+    process.stdout.write(`  + ${t.tenantName} [${t.userType}] ... `);
+    const cfg = await buildTenantAccount(base, t.tenantId);
+    if (!cfg) {
+      console.log("failed (token exchange)");
+      continue;
+    }
+    cfg.tenantName = t.tenantName;
+    cfg.userType = t.userType;
+    saveAccount(t.tenantName, cfg, false);
+    console.log(cfg.skypeToken ? "registered" : "registered (no Teams token)");
+  }
+  console.log();
+  authList();
+}
+
 /** Try to refresh skypetoken using saved refresh token. Returns true on success. */
 export async function tryRefresh(quiet = false): Promise<boolean> {
   const config = loadConfig();
@@ -112,7 +300,7 @@ export async function tryRefresh(quiet = false): Promise<boolean> {
     if (!quiet) console.error("No refresh token saved. Run: ms-cli auth login");
     return false;
   }
-  const clientId = TEAMS_CLIENT_ID;
+  const clientId = config.clientId ?? TEAMS_CLIENT_ID;
 
   const tenantId = config.tenantId ?? "common";
 
@@ -202,11 +390,14 @@ export async function refresh(): Promise<void> {
   if (!success) process.exit(1);
 }
 
-/** Device code flow: get refresh token interactively via browser auth */
-export async function deviceCodeLogin(): Promise<void> {
-  const config = loadConfig();
+/** Device code flow: get refresh token interactively via browser auth.
+ * Logs into a (possibly new) account without clobbering existing ones. */
+export async function deviceCodeLogin(opts: { name?: string; tenant?: string } = {}): Promise<void> {
+  // Start from a fresh account so a second login never overwrites the current one.
+  const config: Config = { skypeToken: "" };
+  let upn: string | undefined;
   const clientId = TEAMS_CLIENT_ID;
-  const tenantId = config.tenantId ?? "common";
+  const tenantId = opts.tenant ?? "common";
 
   // Step 1: Request device code
   const codeRes = await fetch(
@@ -288,6 +479,11 @@ export async function deviceCodeLogin(): Promise<void> {
 
     // Exchange AAD token for skypetoken
     if (tokenData.access_token) {
+      try {
+        const p = decodeJwt(tokenData.access_token);
+        upn = p.upn ?? p.unique_name;
+        if (p.tid) config.tenantId = p.tid;
+      } catch {}
       console.log("Got AAD token. Exchanging for skypetoken...");
       for (const endpoint of [
         "https://teams.microsoft.com/api/authsvc/v1.0/authz",
@@ -313,13 +509,100 @@ export async function deviceCodeLogin(): Promise<void> {
       }
     }
 
-    saveConfig(config);
-    console.log("Login successful.");
+    // Detect region/tenant from the freshly-issued skypetoken.
+    try {
+      const p = decodeJwt(config.skypeToken);
+      if (p.rgn) {
+        config.region = p.rgn;
+        config.chatServiceHost = `${p.rgn}.ng.msg.teams.microsoft.com`;
+      }
+      if (p.tid) config.tenantId = p.tid;
+    } catch {}
+
+    // Account key. Default to the UPN, but the SAME UPN can exist in multiple
+    // tenants (guest/B2B), so disambiguate by tenant to avoid clobbering a
+    // different tenant's account that happens to share the email.
+    const baseKey = opts.name ?? upn ?? config.tenantId ?? "default";
+    let key = baseKey;
+    if (!opts.name) {
+      const clash = listAccounts().some(
+        (a) =>
+          a.key === baseKey &&
+          a.config.tenantId &&
+          config.tenantId &&
+          a.config.tenantId !== config.tenantId
+      );
+      if (clash) key = `${baseKey} (${(config.tenantId ?? "").slice(0, 8)})`;
+    }
+
+    // Re-login to an existing account: keep its derived tokens (outlook/graph/
+    // forms) which the device-code flow doesn't issue. Fresh values win, but
+    // never let an empty skypetoken (exchange failure) clobber a working one.
+    const existing = listAccounts().find((a) => a.key === key)?.config;
+    const merged: Config = { ...(existing ?? { skypeToken: "" }), ...config };
+    if (!config.skypeToken && existing?.skypeToken) merged.skypeToken = existing.skypeToken;
+    saveAccount(key, merged, true);
+
+    console.log(`Login successful. Active account: ${key}`);
+    if (!merged.skypeToken) {
+      console.warn(
+        "Warning: no Teams skypetoken was issued for this tenant " +
+          "(common for guest/B2B accounts). Teams chat may be unavailable; " +
+          "mail/calendar can still work via the refresh token."
+      );
+    }
+
+    // Auto-discover and register any other tenants this user can access.
+    if (!opts.tenant) {
+      console.log("\nDiscovering other tenants...");
+      try {
+        await syncTenants();
+      } catch (e) {
+        console.warn("Tenant discovery skipped:", (e as Error).message);
+      }
+    }
     tokenStatus();
     return;
   }
 
   console.error("Timed out waiting for authentication.");
   process.exit(1);
+}
+
+/** List all stored accounts, marking the current one. */
+export function authList(): void {
+  const accounts = listAccounts();
+  if (accounts.length === 0) {
+    console.log("No accounts. Run: ms-cli auth login");
+    return;
+  }
+  const now = Math.floor(Date.now() / 1000);
+  for (const { key, current, config } of accounts) {
+    const marker = current ? "*" : " ";
+    const upn = accountUpn(config);
+    let state = "no token";
+    try {
+      const exp = decodeJwt(config.skypeToken).exp ?? 0;
+      state = exp > now ? "valid" : "expired";
+    } catch {}
+    const parts = [config.tenantName, upn, config.tenantId, state].filter(Boolean);
+    console.log(`${marker} ${key}  (${parts.join(" | ")})`);
+  }
+  console.log(`\nconfig: ${getConfigPath()}`);
+}
+
+/** Switch the active account. */
+export function authUse(query: string): void {
+  const key = useAccount(query);
+  console.log(`Switched to account: ${key}`);
+  tokenStatus();
+}
+
+/** Remove a stored account. */
+export function authRemove(key: string): void {
+  removeAccount(key);
+  console.log(`Removed account: ${key}`);
+  const current = getCurrentAccountKey();
+  if (current) console.log(`Active account is now: ${current}`);
 }
 

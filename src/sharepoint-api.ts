@@ -49,7 +49,7 @@ export async function ensureGraphToken(): Promise<string> {
         Origin: "https://teams.microsoft.com",
       },
       body: new URLSearchParams({
-        client_id: TEAMS_CLIENT_ID,
+        client_id: config.clientId ?? TEAMS_CLIENT_ID,
         grant_type: "refresh_token",
         refresh_token: config.refreshToken,
         scope: "https://graph.microsoft.com/.default openid profile offline_access",

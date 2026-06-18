@@ -9,3 +9,12 @@ dist/
 *.log
 RESEARCH.md
 bin/
+
+# Local secrets / debug captures / build artifacts (never commit)
+cookies
+storages
+*.har
+ms-cli-darwin-*
+ms-cli-windows-*
+_test_*.ts
+benchmark_results_test/

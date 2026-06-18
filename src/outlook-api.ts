@@ -4,6 +4,7 @@ import { join } from "path";
 import { loadConfig, saveConfig, type Config } from "./config.js";
 import { shortId, registerIds } from "./id-map.js";
 import { ensureGraphToken } from "./sharepoint-api.js";
+import { printAccountHeader } from "./api.js";
 
 const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"; // Microsoft Teams native client
 const OUTLOOK_BASE = "https://outlook.office.com/api/v2.0/me";
@@ -55,7 +56,7 @@ async function ensureOutlookToken(): Promise<string> {
         Origin: "https://teams.microsoft.com",
       },
       body: new URLSearchParams({
-        client_id: TEAMS_CLIENT_ID,
+        client_id: config.clientId ?? TEAMS_CLIENT_ID,
         grant_type: "refresh_token",
         refresh_token: config.refreshToken,
         scope: "https://outlook.office.com/.default openid profile offline_access",
@@ -183,6 +184,7 @@ export async function mailList(options: {
     `/mailfolders/${folder}/messages?$top=${pageSize}&$select=Subject,From,ReceivedDateTime,IsRead,BodyPreview,HasAttachments,Importance&$orderby=ReceivedDateTime desc${filter}`
   )) as ODataResponse<MailMessage>;
 
+  printAccountHeader();
   registerIds(data.value.map((m) => m.Id));
 
   for (const mail of data.value) {
@@ -336,6 +338,7 @@ export async function mailSearch(
     `/messages?$search="${encodeURIComponent(query)}"&$top=${pageSize}&$select=Subject,From,ReceivedDateTime,IsRead,BodyPreview`
   )) as ODataResponse<MailMessage>;
 
+  printAccountHeader();
   if (data.value.length === 0) {
     console.log("No results found.");
     return;
@@ -595,6 +598,7 @@ export async function calendarList(options: {
     )) as ODataResponse<CalendarEvent>;
   }
 
+  printAccountHeader();
   let currentDate = "";
   for (const ev of data.value) {
     if (ev.IsCancelled) continue;
@@ -702,6 +706,7 @@ export async function calendarToday(options?: { user?: string }): Promise<void> 
   }
   const data = { value: raw.value.filter((ev) => !ev.IsCancelled) };
 
+  printAccountHeader();
   const userLabel = options?.user ? ` [${options.user}]` : "";
   console.log(`${c.bold}${c.cyan}── 今日の予定 (${now.toLocaleDateString("ja-JP", { month: "2-digit", day: "2-digit", weekday: "short" })})${userLabel} ──${c.reset}`);
 

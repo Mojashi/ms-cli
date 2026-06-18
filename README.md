@@ -46,6 +46,28 @@ Device Code Flow でブラウザ認証を行います。表示されるURLを開
 
 トークンは `~/.ms-cli/config.json` に保存されます。
 
+### 複数テナント (ゲスト含む)
+
+`ms-cli auth login` すると、**所属する全テナント（ゲスト招待先含む）を自動検出して登録**します。
+ゲストテナントへも 1 回のログインで利用可能になり、テナントを意識せず操作できます。
+
+```bash
+ms-cli auth login        # ログイン → 全テナントを自動検出・登録
+ms-cli auth sync         # ログイン済みの状態で、未登録テナントを再検出
+ms-cli auth list         # 登録済みアカウント一覧 (* = 現在)
+ms-cli auth use <ref>    # 既定アカウントを切替 (key / tenantId / テナント名の一部で指定可)
+ms-cli auth remove <ref> # アカウントを削除
+```
+
+**テナント横断の挙動** (基本的に `auth use` は不要):
+
+- `chat list` — 全テナントのチャットを**混在・新しい順**で表示 (各行に `[テナント名]` を付記)
+- `chat read` / `mail read` 等の ID 指定 — どのテナントの ID かを**自動判定**
+- `mail` / `cal` — メールボックスを持つテナント (メンバー) のみ対象。ゲストは自動スキップ
+- `-a, --account <ref>` で特定テナントに限定。`MS_CLI_ACCOUNT=<ref>` で一時上書きも可
+
+> 仕組み: 1 つの refresh token を各テナントへ redeem し、Teams の `tenantsv2` API で所属テナントを列挙しています。
+
 ## 使い方
 
 ```bash

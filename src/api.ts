@@ -1,4 +1,4 @@
-import { loadConfig, type Config } from "./config.js";
+import { loadConfig, getCurrentAccountKey, type Config } from "./config.js";
 import { shortId, registerIds } from "./id-map.js";
 
 // --- ANSI colors ---
@@ -161,11 +161,31 @@ interface ConversationsResponse {
   };
 }
 
-export async function chatList(options: {
+/** Print which account/tenant the following output belongs to. */
+export function printAccountHeader(): void {
+  const cfg = loadConfig();
+  const key = getCurrentAccountKey();
+  const org = cfg.tenantName ?? key ?? "unknown";
+  const parts = [org];
+  if (key && key !== org) parts.push(key);
+  if (cfg.tenantId) parts.push(`tenant ${cfg.tenantId.slice(0, 8)}`);
+  if (cfg.region) parts.push(cfg.region);
+  console.log(`${c.dim}${c.bold}── ${parts.join(" │ ")} ──${c.reset}`);
+}
+
+export interface ChatEntry {
+  sortTs: number;
+  unread: boolean;
+  lines: string[];
+}
+
+/** Fetch + format conversations into sortable entries (no header/summary printed). */
+export async function chatListEntries(options: {
   pageSize?: number;
   type?: string;
   unreadOnly?: boolean;
-}): Promise<void> {
+  tag?: string;
+}): Promise<ChatEntry[]> {
   const pageSize = options.pageSize ?? 20;
   const data = (await apiGet(
     `/users/ME/conversations?view=mychats&pageSize=${pageSize}`
@@ -186,7 +206,9 @@ export async function chatList(options: {
     conversations = conversations.filter(isUnread);
   }
 
-  for (const conv of conversations) {
+  const tag = options.tag ? `${c.dim}[${options.tag}]${c.reset} ` : "";
+
+  return conversations.map((conv) => {
     const topic = conv.threadProperties?.topic ?? "(no topic)";
     const type = conv.threadProperties?.productThreadType ?? conv.threadProperties?.threadType ?? "unknown";
     const lastMsg = conv.lastMessage;
@@ -196,11 +218,9 @@ export async function chatList(options: {
     const msgtype = lastMsg?.messagetype ?? "";
     const unread = isUnread(conv);
 
-    // Detect if last message is a reaction
     const isReaction = msgtype === "MessageReaction" || msgtype === "Signal/Flamingo";
     let preview: string;
     if (isReaction) {
-      // Try to extract reaction key from content
       const keyMatch = rawContent.match(/key="([^"]+)"/);
       const emoji = keyMatch ? (reactionEmoji[keyMatch[1]] ?? keyMatch[1]) : "\u{1F44D}";
       const textPreview = stripHtml(rawContent).slice(0, 40);
@@ -213,19 +233,41 @@ export async function chatList(options: {
     const marker = unread ? ` ${c.bgRed}${c.white}${c.bold} UNREAD ${c.reset}` : "";
     const topicStyle = unread ? `${c.bold}${c.white}` : c.dim;
 
-    console.log(`${typeColor}[${type}]${c.reset}${marker} ${topicStyle}${topic}${c.reset}`);
-    console.log(`  ${c.dim}id: ${conv.id}${c.reset}`);
+    const lines = [
+      `${tag}${typeColor}[${type}]${c.reset}${marker} ${topicStyle}${topic}${c.reset}`,
+      `  ${c.dim}id: ${conv.id}${c.reset}`,
+    ];
     if (sender || preview) {
-      console.log(`  ${c.green}${sender}${c.reset}: ${preview} ${c.dim}(${formatTime(lastTime)})${c.reset}`);
+      lines.push(`  ${c.green}${sender}${c.reset}: ${preview} ${c.dim}(${formatTime(lastTime)})${c.reset}`);
     }
+
+    const ts = Date.parse(lastTime);
+    return { sortTs: Number.isNaN(ts) ? 0 : ts, unread, lines };
+  });
+}
+
+/** Print a list of chat entries (newest first), with a count summary. */
+export function printChatEntries(entries: ChatEntry[]): void {
+  const sorted = [...entries].sort((a, b) => b.sortTs - a.sortTs);
+  for (const e of sorted) {
+    e.lines.forEach((l) => console.log(l));
     console.log();
   }
+  const unreadCount = sorted.filter((e) => e.unread).length;
+  console.log(
+    unreadCount > 0
+      ? `${c.bold}${sorted.length}${c.reset} conversations (${c.red}${c.bold}${unreadCount} unread${c.reset})`
+      : `${sorted.length} conversations (0 unread)`
+  );
+}
 
-  const unreadCount = conversations.filter(isUnread).length;
-  const summary = unreadCount > 0
-    ? `${c.bold}${conversations.length}${c.reset} conversations (${c.red}${c.bold}${unreadCount} unread${c.reset})`
-    : `${conversations.length} conversations (0 unread)`;
-  console.log(summary);
+export async function chatList(options: {
+  pageSize?: number;
+  type?: string;
+  unreadOnly?: boolean;
+}): Promise<void> {
+  printAccountHeader();
+  printChatEntries(await chatListEntries(options));
 }
 
 // --- Chat Read ---
@@ -343,6 +385,8 @@ export async function chatRead(
     console.log(JSON.stringify(data.messages, null, 2));
     return;
   }
+
+  printAccountHeader();
 
   // Get my consumptionhorizon for this conversation to mark unread messages
   let myHorizon = 0n;
@@ -496,6 +540,8 @@ export async function chatThread(
     console.log(JSON.stringify(thread, null, 2));
     return;
   }
+
+  printAccountHeader();
 
   // Show oldest first
   const sorted = [...thread].sort((a, b) => {
