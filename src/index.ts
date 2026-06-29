@@ -3,7 +3,7 @@ import { tokenStatus, refresh, isTokenValid, tryRefresh, deviceCodeLogin, authLi
 import { listAccounts } from "./config.js";
 import { chatList, chatRead, chatSend, chatMarkRead, chatThread, chatListEntries, printChatEntries, type ChatEntry } from "./api.js";
 import { mailList, mailRead, mailSearch, mailDraft, mailSend, mailCompose, mailReply, mailOpen, mailAttachments, calendarList, calendarRead, calendarToday, calendarSchedule, calendarFindSlot } from "./outlook-api.js";
-import { spSites, spDrives, spFiles, spDownload, spSearch, spRecent, spOpen, spUpload, spConvert, spDelete, spUploadConvert } from "./sharepoint-api.js";
+import { spSites, spDrives, spFiles, spDownload, spSearch, spRecent, spOpen, spUpload, spConvert, spDelete, spUploadConvert, spMkdir, spShare } from "./sharepoint-api.js";
 import { formsList, formsRead, formsResponses, formsGroup } from "./forms-api.js";
 import { requireTouchId } from "./touchid.js";
 import { resolveId } from "./id-map.js";
@@ -558,9 +558,33 @@ sp
   .command("upload <driveId> <localPath>")
   .description("Upload a local file to a drive")
   .option("-p, --remote-path <path>", "Remote filename/path (default: same as local)")
+  .option("--share", "Create and print an org-internal view share link")
+  .option("--share-scope <scope>", "Share scope: organization | anonymous (default: organization)")
   .action(async (driveId: string, localPath: string, opts) => {
     await ensureToken();
-    await spUpload(driveId, localPath, { remotePath: opts.remotePath });
+    await spUpload(driveId, localPath, {
+      remotePath: opts.remotePath,
+      share: opts.share,
+      shareScope: opts.shareScope,
+    });
+  });
+
+sp
+  .command("mkdir <driveId> <folderPath>")
+  .description("Create a (possibly nested) folder under the drive root (idempotent)")
+  .action(async (driveId: string, folderPath: string) => {
+    await ensureToken();
+    await spMkdir(driveId, folderPath);
+  });
+
+sp
+  .command("share <driveId> <itemId>")
+  .description("Create a sharing link for an item")
+  .option("-t, --type <type>", "Link type: view | edit (default: view)")
+  .option("-s, --scope <scope>", "Scope: organization | anonymous (default: organization)")
+  .action(async (driveId: string, itemId: string, opts) => {
+    await ensureToken();
+    await spShare(driveId, itemId, { type: opts.type, scope: opts.scope });
   });
 
 sp

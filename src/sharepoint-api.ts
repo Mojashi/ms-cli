@@ -112,6 +112,30 @@ async function graphGet(path: string): Promise<unknown> {
   return res.json();
 }
 
+async function graphPost(path: string, body: unknown): Promise<unknown> {
+  const token = await ensureGraphToken();
+  const res = await graphFetch(path, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Graph API error ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return res.json();
+}
+
+/** パスをセグメント単位で URL エンコード（スラッシュは保持） */
+function encPath(p: string): string {
+  return p
+    .split("/")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+}
+
 async function graphGetRaw(path: string): Promise<Response> {
   const token = await ensureGraphToken();
   const res = await graphFetch(path, {
@@ -442,7 +466,7 @@ const SMALL_FILE_LIMIT = 4 * 1024 * 1024; // 4 MB
 export async function spUpload(
   driveId: string,
   localPath: string,
-  options: { remotePath?: string }
+  options: { remotePath?: string; share?: boolean; shareScope?: string }
 ): Promise<void> {
   const fileName = basename(localPath);
   const remoteName = options.remotePath ?? fileName;
@@ -450,12 +474,13 @@ export async function spUpload(
   const fileData = readFileSync(localPath);
 
   const token = await ensureGraphToken();
+  let uploaded: DriveItem | undefined;
 
   if (fileSize <= SMALL_FILE_LIMIT) {
     // Simple upload for small files
     console.log(`Uploading ${c.bold}${fileName}${c.reset} (${formatSize(fileSize)})...`);
     const res = await graphFetch(
-      `/drives/${encodeURIComponent(driveId)}/root:/${encodeURIComponent(remoteName)}:/content`,
+      `/drives/${encodeURIComponent(driveId)}/root:/${encPath(remoteName)}:/content`,
       {
         method: "PUT",
         headers: {
@@ -470,6 +495,7 @@ export async function spUpload(
       throw new Error(`Upload failed (${res.status}): ${text.slice(0, 300)}`);
     }
     const item = (await res.json()) as DriveItem;
+    uploaded = item;
     console.log(`${c.green}Uploaded:${c.reset} ${item.name}`);
     console.log(`  ${c.dim}id: ${item.id}${c.reset}`);
     console.log(`  ${c.dim}url: ${item.webUrl}${c.reset}`);
@@ -477,7 +503,7 @@ export async function spUpload(
     // Upload session for large files
     console.log(`Uploading ${c.bold}${fileName}${c.reset} (${formatSize(fileSize)}) via upload session...`);
     const sessionRes = await graphFetch(
-      `/drives/${encodeURIComponent(driveId)}/root:/${encodeURIComponent(remoteName)}:/createUploadSession`,
+      `/drives/${encodeURIComponent(driveId)}/root:/${encPath(remoteName)}:/createUploadSession`,
       {
         method: "POST",
         headers: {
@@ -526,6 +552,7 @@ export async function spUpload(
     }
 
     if (item) {
+      uploaded = item;
       console.log(`${c.green}Uploaded:${c.reset} ${item.name}`);
       console.log(`  ${c.dim}id: ${item.id}${c.reset}`);
       console.log(`  ${c.dim}url: ${item.webUrl}${c.reset}`);
@@ -533,6 +560,98 @@ export async function spUpload(
       console.log(`${c.green}Upload complete.${c.reset}`);
     }
   }
+
+  // --share: アップロード後に共有リンクを生成して表示
+  if (options.share && uploaded) {
+    const link = await createShareLink(driveId, uploaded.id, "view", options.shareScope ?? "organization");
+    console.log(`${c.green}Share link:${c.reset} ${link}`);
+  }
+}
+
+// --- Folder create / Share link ---
+
+/** ルートからの相対パスのフォルダが存在すれば DriveItem を返す（無ければ null） */
+async function getItemByPath(driveId: string, relPath: string): Promise<DriveItem | null> {
+  const token = await ensureGraphToken();
+  const url = relPath
+    ? `/drives/${encodeURIComponent(driveId)}/root:/${encPath(relPath)}`
+    : `/drives/${encodeURIComponent(driveId)}/root`;
+  const res = await graphFetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Graph API error ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return (await res.json()) as DriveItem;
+}
+
+/** 親フォルダ(relParent)配下に1フォルダを作成（既存は409→GETで吸収） */
+async function createChildFolder(driveId: string, relParent: string, name: string): Promise<DriveItem> {
+  const token = await ensureGraphToken();
+  const childrenUrl = relParent
+    ? `/drives/${encodeURIComponent(driveId)}/root:/${encPath(relParent)}:/children`
+    : `/drives/${encodeURIComponent(driveId)}/root/children`;
+  const res = await graphFetch(childrenUrl, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, folder: {}, "@microsoft.graph.conflictBehavior": "fail" }),
+  });
+  if (res.ok) return (await res.json()) as DriveItem;
+  if (res.status === 409) {
+    const full = relParent ? `${relParent}/${name}` : name;
+    const item = await getItemByPath(driveId, full);
+    if (item) return item;
+  }
+  throw new Error(`mkdir failed at "${name}" (${res.status}): ${(await res.text()).slice(0, 200)}`);
+}
+
+/** ネストしたフォルダを冪等に確保する（フルパスをGET→無ければ親を再帰確保して葉を作成） */
+async function ensureFolder(driveId: string, relPath: string): Promise<DriveItem | null> {
+  if (!relPath) return null; // root
+  const existing = await getItemByPath(driveId, relPath);
+  if (existing) return existing;
+  const idx = relPath.lastIndexOf("/");
+  const parent = idx >= 0 ? relPath.slice(0, idx) : "";
+  const leaf = idx >= 0 ? relPath.slice(idx + 1) : relPath;
+  await ensureFolder(driveId, parent); // 親を先に確保
+  return createChildFolder(driveId, parent, leaf);
+}
+
+/** ネストしたフォルダをルート配下に冪等作成する */
+export async function spMkdir(driveId: string, folderPath: string): Promise<void> {
+  const rel = folderPath.split("/").map((s) => s.trim()).filter(Boolean).join("/");
+  if (!rel) throw new Error("フォルダパスが空です");
+  const item = await ensureFolder(driveId, rel);
+  console.log(`${c.green}Folder:${c.reset} ${folderPath}`);
+  if (item) {
+    console.log(`  ${c.dim}id: ${item.id}${c.reset}`);
+    console.log(`  ${c.dim}url: ${item.webUrl}${c.reset}`);
+  }
+}
+
+async function createShareLink(
+  driveId: string,
+  itemId: string,
+  type: string,
+  scope: string
+): Promise<string> {
+  const res = (await graphPost(
+    `/drives/${encodeURIComponent(driveId)}/items/${encodeURIComponent(itemId)}/createLink`,
+    { type, scope }
+  )) as { link?: { webUrl?: string } };
+  const url = res.link?.webUrl;
+  if (!url) throw new Error("共有リンクの生成に失敗しました");
+  return url;
+}
+
+/** 共有リンクを生成して表示（既定: 組織内・閲覧） */
+export async function spShare(
+  driveId: string,
+  itemId: string,
+  options: { type?: string; scope?: string }
+): Promise<void> {
+  const type = options.type ?? "view";
+  const scope = options.scope ?? "organization";
+  const url = await createShareLink(driveId, itemId, type, scope);
+  console.log(`${c.green}Share link (${type}/${scope}):${c.reset}`);
+  console.log(url);
 }
 
 // --- Delete ---
@@ -641,7 +760,7 @@ export async function spUploadConvert(
     item = (await res.json()) as DriveItem;
   } else {
     const sessionRes = await graphFetch(
-      `/drives/${encodeURIComponent(driveId)}/root:/${encodeURIComponent(remoteName)}:/createUploadSession`,
+      `/drives/${encodeURIComponent(driveId)}/root:/${encPath(remoteName)}:/createUploadSession`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
