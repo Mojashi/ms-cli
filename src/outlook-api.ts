@@ -1,7 +1,7 @@
 import { execSync } from "child_process";
 import { writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { loadConfig, saveConfig, type Config } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 import { shortId, registerIds } from "./id-map.js";
 import { ensureGraphToken } from "./sharepoint-api.js";
 import { printAccountHeader } from "./api.js";
@@ -805,7 +805,7 @@ async function scheduleFromCalendarView(
   )) as { value: Array<{ subject?: string; start: { dateTime: string; timeZone: string }; end: { dateTime: string; timeZone: string }; showAs?: string; isCancelled?: boolean }> };
 
   // Build availability view (0=free, 1=tentative, 2=busy, 3=oof)
-  const slots = new Array(totalSlots).fill(0);
+  const slots = Array.from({ length: totalSlots }, () => 0);
   const items: ScheduleItem[] = [];
 
   for (const ev of events.value) {
@@ -1016,7 +1016,7 @@ export async function calendarFindSlot(options: {
     const totalSlots = (endHour - startHour) * 2;
 
     // Merge availability: a slot is free only if ALL users are free (0)
-    const merged = new Array(totalSlots).fill(true);
+    const merged = Array.from({ length: totalSlots }, () => true);
     for (const sched of schedules) {
       if (sched.error || !sched.availabilityView) {
         // Treat errored user as fully busy (cannot confirm availability)

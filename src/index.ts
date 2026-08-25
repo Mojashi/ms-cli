@@ -1,5 +1,5 @@
 import { program } from "commander";
-import { tokenStatus, refresh, isTokenValid, tryRefresh, deviceCodeLogin, authList, authUse, authRemove, syncTenants } from "./auth.js";
+import { tokenStatus, refresh, isTokenValid, tryRefresh, webViewLogin, authList, authUse, authRemove, syncTenants } from "./auth.js";
 import { listAccounts } from "./config.js";
 import { chatList, chatRead, chatSend, chatMarkRead, chatThread, chatListEntries, printChatEntries, type ChatEntry } from "./api.js";
 import { mailList, mailRead, mailSearch, mailDraft, mailSend, mailCompose, mailReply, mailOpen, mailAttachments, calendarList, calendarRead, calendarToday, calendarSchedule, calendarFindSlot } from "./outlook-api.js";
@@ -141,18 +141,18 @@ async function ensureToken(): Promise<void> {
   process.exit(1);
 }
 
-program.name("ms-cli").description("Teams Internal API CLI").version("0.3.0");
+program.name("ms-cli").description("Teams Internal API CLI").version("0.5.0");
 
 // --- auth ---
 const auth = program.command("auth").description("Token management");
 
 auth
   .command("login")
-  .description("Login via device code flow (adds/switches account)")
+  .description("Login in a Microsoft 365 WebView (adds/switches account)")
   .option("--name <name>", "Account label (default: your email/UPN)")
   .option("--tenant <id>", "Tenant ID or domain to log into (default: common)")
   .action(async (opts) => {
-    await deviceCodeLogin({ name: opts.name, tenant: opts.tenant });
+    await webViewLogin({ name: opts.name, tenant: opts.tenant });
   });
 
 auth

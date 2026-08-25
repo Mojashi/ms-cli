@@ -1,4 +1,10 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -92,8 +98,13 @@ function legacyAccountKey(config: Config): string {
 }
 
 function writeStore(store: Store): void {
-  mkdirSync(CONFIG_DIR, { recursive: true });
-  writeFileSync(CONFIG_FILE, JSON.stringify(store, null, 2));
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  chmodSync(CONFIG_DIR, 0o700);
+  writeFileSync(CONFIG_FILE, `${JSON.stringify(store, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(CONFIG_FILE, 0o600);
 }
 
 /**

@@ -1,19 +1,18 @@
 # ms-cli 使い方
 
-Microsoft Teams チャット + Outlook メールを操作するCLI。
-Graph APIが使えない環境向けに、Teams/Outlook内部APIを利用。
+Microsoft Teams、Outlook、Microsoft Graph、Forms を操作する macOS 向け CLI。
 
 ## セットアップ
 
 ### 前提条件
-- Node.js 22+
-- Chrome で Teams (`teams.microsoft.com`) にログイン済み
-- macOS (Chrome Cookie復号にKeychainアクセスが必要)
+
+- macOS
+- Node.js 22+ または Bun（ソースから実行する場合）
 
 ### インストール
 ```bash
 cd ~/repos/ms-cli
-pnpm install
+bun install
 ```
 
 PATHに登録済み (`~/.local/bin/ms-cli` → `~/repos/ms-cli/bin/ms-cli.mjs`)。
@@ -25,14 +24,18 @@ PATHに登録済み (`~/.local/bin/ms-cli` → `~/repos/ms-cli/bin/ms-cli.mjs`)�
 ```bash
 ms-cli auth login
 ```
-1. Chrome Cookie DB から `skypetoken_asm` を自動抽出
-2. Cookie がなければ Puppeteer で Chrome を起動してログインフロー実行
-3. トークンは `~/.ms-cli/config.json` に保存
 
-### 手動トークン指定
+1. macOS のログイン専用 WebView が開く
+2. Microsoft 365 アカウントを選択してログインする
+3. Authorization Code + PKCE で access token と refresh token を取得する
+4. `~/.ms-cli/config.json` にアカウント別で保存する
+
+Device Code Flow、Teams プロセス、Chrome Cookie は使用しません。設定ファイルは mode `0600` で保存されます。
+
+特定テナントへ直接ログインする場合:
+
 ```bash
-ms-cli auth login --token <skypetoken_asm値>
-ms-cli auth login --token <token> --refresh-token <MSAL refresh token>
+ms-cli auth login --tenant <tenant-id-or-domain>
 ```
 
 ### ステータス確認
@@ -45,7 +48,7 @@ ms-cli auth status
 ```bash
 ms-cli auth refresh
 ```
-MSAL refresh token を使って skypetoken を再取得。
+保存済み refresh token を使って skypetoken を再取得します。Graph、Outlook、Forms の access token は各機能の実行時に必要に応じて自動更新されます。
 
 ## Teams チャット
 
@@ -223,12 +226,20 @@ ms-cli mail draft --to tanaka@example.com -s "件名" -b "本文"
 `~/.ms-cli/config.json`:
 ```json
 {
-  "skypeToken": "eyJ...",
-  "refreshToken": "1.AWs...",
-  "outlookToken": "eyJ...",
-  "tenantId": "<your-tenant-id>",
-  "region": "<region>",
-  "chatServiceHost": "<region>.ng.msg.teams.microsoft.com"
+  "version": 2,
+  "current": "user@example.com",
+  "accounts": {
+    "user@example.com": {
+      "skypeToken": "eyJ...",
+      "refreshToken": "1.AWs...",
+      "outlookToken": "eyJ...",
+      "graphToken": "eyJ...",
+      "formsToken": "eyJ...",
+      "tenantId": "<your-tenant-id>",
+      "region": "<region>",
+      "chatServiceHost": "<region>.ng.msg.teams.microsoft.com"
+    }
+  }
 }
 ```
 
@@ -236,9 +247,9 @@ ms-cli mail draft --to tanaka@example.com -s "件名" -b "本文"
 
 | トークン | 有効期間 | 自動更新 |
 |---------|---------|---------|
-| skypetoken_asm | ~24h | `auth refresh` で手動更新 / Cookie再抽出 |
-| Outlook Bearer | ~1h | `mail` コマンド実行時に自動更新 |
-| MSAL refresh token | 長期間 | AADトークン取得時にローテーション |
+| Teams skypetoken | 数時間〜約1日 | 期限切れ時または `auth refresh` で更新 |
+| Graph / Outlook / Forms access token | 約1時間 | 各コマンド実行時に自動更新 |
+| OAuth refresh token | 長期間 | access token更新時にローテーション |
 
 ## ファイル構成
 
@@ -250,9 +261,10 @@ ms-cli mail draft --to tanaka@example.com -s "件名" -b "本文"
 │   ├── api.ts              # Teams Chat API クライアント
 │   ├── outlook-api.ts      # Outlook REST API クライアント
 │   ├── auth.ts             # トークン管理・リフレッシュ
+│   ├── oauth-webview.ts    # WebView + Authorization Code/PKCE
 │   ├── config.ts           # 設定永続化 (~/.ms-cli/config.json)
-│   ├── cookie-extractor.ts # Chrome Cookie DB復号
-│   └── browser-login.ts    # Puppeteer ブラウザログイン
+│   ├── sharepoint-api.ts   # Microsoft Graph / SharePoint
+│   └── forms-api.ts        # Microsoft Forms API
 ├── RESEARCH.md             # API調査結果
 └── USAGE.md                # このファイル
 ```

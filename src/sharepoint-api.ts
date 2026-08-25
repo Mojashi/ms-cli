@@ -1,6 +1,6 @@
 import { writeFileSync, readFileSync, mkdirSync, statSync } from "fs";
 import { join, basename } from "path";
-import { loadConfig, saveConfig, type Config } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 
 const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";

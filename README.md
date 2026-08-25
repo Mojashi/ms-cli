@@ -7,6 +7,8 @@ Microsoft Teams チャット・Outlook メール・カレンダーをターミ�
 - **Teams チャット** — 一覧・閲覧・送信・既読マーク
 - **Outlook メール** — 一覧・閲覧・検索・下書き・送信・返信・添付ファイル
 - **カレンダー** — 今日の予定・一覧・詳細・複数ユーザーのスケジュール表示・空きスロット検索
+- **SharePoint / OneDrive** — サイト・ファイルの検索、ダウンロード、アップロード
+- **Microsoft Forms** — フォーム、質問、回答の参照
 - **Touch ID** — 送信系操作は指紋認証が必須（Claude Code 経由でも安全）
 
 ## インストール
@@ -42,9 +44,9 @@ mv ms-cli /usr/local/bin/
 ms-cli auth login
 ```
 
-Device Code Flow でブラウザ認証を行います。表示されるURLを開いてコードを入力するだけです。
+macOS の専用 WebView が開き、Microsoft 365 の通常のログイン画面が表示されます。認証には Authorization Code Flow + PKCE を使い、Device Code Flow は使用しません。
 
-トークンは `~/.ms-cli/config.json` に保存されます。
+取得した refresh token と各 API の access token は `~/.ms-cli/config.json` に保存されます。ファイルは所有ユーザーだけが読み書きできる mode `0600` で作成されます。
 
 ### 複数テナント (ゲスト含む)
 
@@ -113,10 +115,15 @@ ms-cli cal find-slot user1@example.com --duration 30
 | フィールド        | 説明                                             |
 | ----------------- | ------------------------------------------------ |
 | `skypeToken`      | Teams 内部 JWT (ログイン時に自動設定)            |
-| `refreshToken`    | MSAL リフレッシュトークン (ログイン時に自動設定) |
+| `refreshToken`    | OAuth リフレッシュトークン (ログイン時に自動設定) |
+| `graphToken`      | Microsoft Graph access token                     |
+| `outlookToken`    | Outlook access token                             |
+| `formsToken`      | Microsoft Forms access token                     |
 | `tenantId`        | Azure AD テナント ID (ログイン時に自動検出)      |
 | `region`          | リージョン (ログイン時に自動検出)                |
 | `chatServiceHost` | Teams Chat API ホスト (ログイン時に自動設定)     |
+
+refresh token は Graph、Outlook、Forms、Teams チャット用 token の自動更新に利用されます。`auth remove` を実行すると、対象アカウントの token を含む設定が削除されます。
 
 ## License
 

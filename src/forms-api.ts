@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig, type Config } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 
 const TEAMS_CLIENT_ID = "1fec8e78-bce4-4aaf-ab1b-5451cc387264";
 const FORMS_BASE = "https://forms.office.com/formapi/api";

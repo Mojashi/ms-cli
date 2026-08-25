@@ -9,6 +9,7 @@ import {
   getCurrentAccountKey,
   type Config,
 } from "./config.js";
+import { acquireInteractiveToken } from "./oauth-webview.js";
 
 interface JwtPayload {
   iat?: number;
@@ -271,6 +272,36 @@ export async function syncTenants(): Promise<void> {
   for (const t of tenants) {
     const existing = listAccounts().find((a) => a.config.tenantId === t.tenantId);
     if (existing) {
+      // Metadata-only accounts can remain after migration or an interrupted
+      // login. Rebuild their tenant-specific refresh token instead of treating
+      // them as fully registered.
+      if (!existing.config.refreshToken) {
+        process.stdout.write(
+          `  ~ ${t.tenantName} [${t.userType}] ... recovering authentication ... `
+        );
+        const recovered = await buildTenantAccount(base, t.tenantId);
+        if (!recovered) {
+          console.log("failed (token exchange)");
+          continue;
+        }
+        saveAccount(
+          existing.key,
+          {
+            ...existing.config,
+            ...recovered,
+            tenantName: t.tenantName,
+            userType: t.userType,
+          },
+          false
+        );
+        console.log(
+          recovered.skypeToken
+            ? "recovered"
+            : "recovered (no Teams token)"
+        );
+        continue;
+      }
+
       // Backfill the friendly tenant name / user type onto existing accounts.
       if (existing.config.tenantName !== t.tenantName || existing.config.userType !== t.userType) {
         saveAccount(existing.key, { ...existing.config, tenantName: t.tenantName, userType: t.userType }, false);
@@ -390,183 +421,113 @@ export async function refresh(): Promise<void> {
   if (!success) process.exit(1);
 }
 
-/** Device code flow: get refresh token interactively via browser auth.
- * Logs into a (possibly new) account without clobbering existing ones. */
-export async function deviceCodeLogin(opts: { name?: string; tenant?: string } = {}): Promise<void> {
+/**
+ * Authorization-code + PKCE login in a macOS WebView. Logs into a possibly
+ * new account without clobbering existing accounts. Tokens are stored in the
+ * regular multi-account config after the interactive login succeeds.
+ */
+export async function webViewLogin(
+  opts: { name?: string; tenant?: string } = {}
+): Promise<void> {
   // Start from a fresh account so a second login never overwrites the current one.
   const config: Config = { skypeToken: "" };
   let upn: string | undefined;
   const clientId = TEAMS_CLIENT_ID;
   const tenantId = opts.tenant ?? "common";
 
-  // Step 1: Request device code
-  const codeRes = await fetch(
-    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/devicecode`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: clientId,
-        scope: "https://api.spaces.skype.com/.default openid profile offline_access",
-      }),
-    }
+  console.log("Opening Microsoft 365 login...");
+  const tokenData = await acquireInteractiveToken(
+    clientId,
+    tenantId,
+    SPACES_SCOPE
   );
+  config.refreshToken = tokenData.refreshToken;
+  config.refreshTokenIssuedAt = Math.floor(Date.now() / 1000);
 
-  if (!codeRes.ok) {
-    const text = await codeRes.text();
-    console.error(`Device code request failed (${codeRes.status}): ${text}`);
-    process.exit(1);
+  // Exchange the AAD access token for a Teams skypetoken.
+  try {
+    const payload = decodeJwt(tokenData.accessToken);
+    upn = payload.upn ?? payload.unique_name;
+    if (payload.tid) config.tenantId = payload.tid;
+  } catch {}
+  console.log("Got AAD token. Exchanging for skypetoken...");
+  for (const endpoint of AUTHZ_ENDPOINTS) {
+    try {
+      const skypeResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${tokenData.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      if (!skypeResponse.ok) continue;
+      const skypeData = (await skypeResponse.json()) as {
+        tokens?: { skypeToken?: string };
+      };
+      if (skypeData.tokens?.skypeToken) {
+        config.skypeToken = skypeData.tokens.skypeToken;
+        break;
+      }
+    } catch {}
   }
 
-  const codeData = (await codeRes.json()) as {
-    device_code: string;
-    user_code: string;
-    verification_uri: string;
-    expires_in: number;
-    interval: number;
-    message: string;
-  };
-
-  console.log(codeData.message);
-
-  // Open browser automatically
-  const { execSync } = await import("child_process");
+  // Detect region/tenant from the freshly-issued skypetoken.
   try {
-    execSync(`open "${codeData.verification_uri}"`);
+    const payload = decodeJwt(config.skypeToken);
+    if (payload.rgn) {
+      config.region = payload.rgn;
+      config.chatServiceHost = `${payload.rgn}.ng.msg.teams.microsoft.com`;
+    }
+    if (payload.tid) config.tenantId = payload.tid;
   } catch {}
 
-  // Step 2: Poll for token
-  const interval = (codeData.interval ?? 5) * 1000;
-  const deadline = Date.now() + codeData.expires_in * 1000;
-
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, interval));
-
-    const tokenRes = await fetch(
-      `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: clientId,
-          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-          device_code: codeData.device_code,
-        }),
-      }
+  // Account key. Default to the UPN, but the SAME UPN can exist in multiple
+  // tenants (guest/B2B), so disambiguate by tenant to avoid clobbering a
+  // different tenant's account that happens to share the email.
+  const baseKey = opts.name ?? upn ?? config.tenantId ?? "default";
+  let key = baseKey;
+  if (!opts.name) {
+    const clash = listAccounts().some(
+      (account) =>
+        account.key === baseKey &&
+        account.config.tenantId &&
+        config.tenantId &&
+        account.config.tenantId !== config.tenantId
     );
-
-    const tokenData = (await tokenRes.json()) as {
-      access_token?: string;
-      refresh_token?: string;
-      error?: string;
-    };
-
-    if (tokenData.error === "authorization_pending") continue;
-    if (tokenData.error === "slow_down") {
-      await new Promise((r) => setTimeout(r, 5000));
-      continue;
-    }
-    if (tokenData.error) {
-      console.error(`Auth failed: ${tokenData.error}`);
-      process.exit(1);
-    }
-
-    // Success
-    if (tokenData.refresh_token) {
-      config.refreshToken = tokenData.refresh_token;
-      config.refreshTokenIssuedAt = Math.floor(Date.now() / 1000);
-    }
-
-    // Exchange AAD token for skypetoken
-    if (tokenData.access_token) {
-      try {
-        const p = decodeJwt(tokenData.access_token);
-        upn = p.upn ?? p.unique_name;
-        if (p.tid) config.tenantId = p.tid;
-      } catch {}
-      console.log("Got AAD token. Exchanging for skypetoken...");
-      for (const endpoint of [
-        "https://teams.microsoft.com/api/authsvc/v1.0/authz",
-        "https://authsvc.teams.microsoft.com/v1.0/authz",
-      ]) {
-        try {
-          const skypeRes = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${tokenData.access_token}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({}),
-          });
-          if (skypeRes.ok) {
-            const skypeData = (await skypeRes.json()) as { tokens?: { skypeToken?: string } };
-            if (skypeData.tokens?.skypeToken) {
-              config.skypeToken = skypeData.tokens.skypeToken;
-              break;
-            }
-          }
-        } catch {}
-      }
-    }
-
-    // Detect region/tenant from the freshly-issued skypetoken.
-    try {
-      const p = decodeJwt(config.skypeToken);
-      if (p.rgn) {
-        config.region = p.rgn;
-        config.chatServiceHost = `${p.rgn}.ng.msg.teams.microsoft.com`;
-      }
-      if (p.tid) config.tenantId = p.tid;
-    } catch {}
-
-    // Account key. Default to the UPN, but the SAME UPN can exist in multiple
-    // tenants (guest/B2B), so disambiguate by tenant to avoid clobbering a
-    // different tenant's account that happens to share the email.
-    const baseKey = opts.name ?? upn ?? config.tenantId ?? "default";
-    let key = baseKey;
-    if (!opts.name) {
-      const clash = listAccounts().some(
-        (a) =>
-          a.key === baseKey &&
-          a.config.tenantId &&
-          config.tenantId &&
-          a.config.tenantId !== config.tenantId
-      );
-      if (clash) key = `${baseKey} (${(config.tenantId ?? "").slice(0, 8)})`;
-    }
-
-    // Re-login to an existing account: keep its derived tokens (outlook/graph/
-    // forms) which the device-code flow doesn't issue. Fresh values win, but
-    // never let an empty skypetoken (exchange failure) clobber a working one.
-    const existing = listAccounts().find((a) => a.key === key)?.config;
-    const merged: Config = { ...(existing ?? { skypeToken: "" }), ...config };
-    if (!config.skypeToken && existing?.skypeToken) merged.skypeToken = existing.skypeToken;
-    saveAccount(key, merged, true);
-
-    console.log(`Login successful. Active account: ${key}`);
-    if (!merged.skypeToken) {
-      console.warn(
-        "Warning: no Teams skypetoken was issued for this tenant " +
-          "(common for guest/B2B accounts). Teams chat may be unavailable; " +
-          "mail/calendar can still work via the refresh token."
-      );
-    }
-
-    // Auto-discover and register any other tenants this user can access.
-    if (!opts.tenant) {
-      console.log("\nDiscovering other tenants...");
-      try {
-        await syncTenants();
-      } catch (e) {
-        console.warn("Tenant discovery skipped:", (e as Error).message);
-      }
-    }
-    tokenStatus();
-    return;
+    if (clash) key = `${baseKey} (${(config.tenantId ?? "").slice(0, 8)})`;
   }
 
-  console.error("Timed out waiting for authentication.");
-  process.exit(1);
+  // Re-login keeps still-valid derived resource tokens. Fresh values win, but
+  // an authz failure must not clobber an existing working skypetoken.
+  const existing = listAccounts().find(
+    (account) => account.key === key
+  )?.config;
+  const merged: Config = { ...(existing ?? { skypeToken: "" }), ...config };
+  if (!config.skypeToken && existing?.skypeToken) {
+    merged.skypeToken = existing.skypeToken;
+  }
+  saveAccount(key, merged, true);
+
+  console.log(`Login successful. Active account: ${key}`);
+  if (!merged.skypeToken) {
+    console.warn(
+      "Warning: no Teams skypetoken was issued for this tenant " +
+        "(common for guest/B2B accounts). Teams chat may be unavailable; " +
+        "mail/calendar can still work via the refresh token."
+    );
+  }
+
+  // Auto-discover and register any other tenants this user can access.
+  if (!opts.tenant) {
+    console.log("\nDiscovering other tenants...");
+    try {
+      await syncTenants();
+    } catch (error) {
+      console.warn("Tenant discovery skipped:", (error as Error).message);
+    }
+  }
+  tokenStatus();
 }
 
 /** List all stored accounts, marking the current one. */
@@ -605,4 +566,3 @@ export function authRemove(key: string): void {
   const current = getCurrentAccountKey();
   if (current) console.log(`Active account is now: ${current}`);
 }
-
