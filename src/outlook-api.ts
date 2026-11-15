@@ -21,7 +21,9 @@ const c = {
   magenta: "\x1b[35m",
   cyan: "\x1b[36m",
   white: "\x1b[37m",
+  black: "\x1b[30m",
   bgRed: "\x1b[41m",
+  bgYellow: "\x1b[43m",
 };
 
 async function ensureOutlookToken(): Promise<string> {
@@ -164,11 +166,30 @@ interface MailMessage {
   From: { EmailAddress: { Name: string; Address: string } };
   ReceivedDateTime: string;
   IsRead: boolean;
+  IsDraft?: boolean;
   BodyPreview?: string;
   HasAttachments?: boolean;
   Importance?: string;
   ToRecipients?: Array<{ EmailAddress: { Name: string; Address: string } }>;
   Body?: { ContentType: string; Content: string };
+}
+
+// 未送信の下書きに付ける印。一覧・検索・本文表示で同じ見た目にする
+const DRAFT_BADGE = `${c.bgYellow}${c.black}${c.bold} DRAFT ${c.reset}`;
+
+type Correspondent = { EmailAddress?: { Name?: string; Address?: string } };
+
+function correspondentName(person: Correspondent | undefined): string | undefined {
+  return person?.EmailAddress?.Name ?? person?.EmailAddress?.Address;
+}
+
+// 一覧の2行目に出す相手。下書きは差出人が空のことがあるので、宛先を「→ 宛先」で示す
+function correspondentLabel(mail: MailMessage): string {
+  if (!mail.IsDraft) return correspondentName(mail.From) ?? "unknown";
+  const recipients = (mail.ToRecipients ?? [])
+    .map(correspondentName)
+    .filter((name): name is string => !!name);
+  return recipients.length > 0 ? `→ ${recipients.join(", ")}` : "→ (宛先なし)";
 }
 
 export async function mailList(options: {
@@ -181,7 +202,7 @@ export async function mailList(options: {
   const filter = options.unreadOnly ? "&$filter=IsRead eq false" : "";
 
   const data = (await outlookGet(
-    `/mailfolders/${folder}/messages?$top=${pageSize}&$select=Subject,From,ReceivedDateTime,IsRead,BodyPreview,HasAttachments,Importance&$orderby=ReceivedDateTime desc${filter}`
+    `/mailfolders/${folder}/messages?$top=${pageSize}&$select=Subject,From,ToRecipients,ReceivedDateTime,IsRead,IsDraft,BodyPreview,HasAttachments,Importance&$orderby=ReceivedDateTime desc${filter}`
   )) as ODataResponse<MailMessage>;
 
   printAccountHeader();
@@ -189,11 +210,12 @@ export async function mailList(options: {
 
   for (const mail of data.value) {
     const sid = shortId(mail.Id);
-    const from = mail.From?.EmailAddress?.Name ?? mail.From?.EmailAddress?.Address ?? "unknown";
+    const from = correspondentLabel(mail);
     const time = formatTime(mail.ReceivedDateTime);
     const subject = mail.Subject ?? "(no subject)";
     const preview = (mail.BodyPreview ?? "").replace(/\r?\n/g, " ").slice(0, 70);
-    const unread = !mail.IsRead;
+    const unread = !mail.IsRead && !mail.IsDraft;
+    const draft = mail.IsDraft ? ` ${DRAFT_BADGE}` : "";
     const attach = mail.HasAttachments ? " [+]" : "";
     const imp = mail.Importance === "High" ? ` ${c.red}[!]${c.reset}` : "";
 
@@ -202,7 +224,7 @@ export async function mailList(options: {
       : "      ";
     const subjectStyle = unread ? `${c.bold}${c.white}` : `${c.dim}`;
 
-    console.log(`${marker}${c.yellow}${sid}${c.reset} ${subjectStyle}${subject}${c.reset}${attach}${imp}`);
+    console.log(`${marker}${c.yellow}${sid}${c.reset} ${subjectStyle}${subject}${c.reset}${draft}${attach}${imp}`);
     console.log(`        ${c.green}${from}${c.reset} ${c.dim}(${time})${c.reset}`);
     if (preview) {
       console.log(`        ${c.dim}${preview}${c.reset}`);
@@ -210,7 +232,7 @@ export async function mailList(options: {
     console.log();
   }
 
-  const unreadCount = data.value.filter((m) => !m.IsRead).length;
+  const unreadCount = data.value.filter((m) => !m.IsRead && !m.IsDraft).length;
   console.log(
     `${c.bold}${data.value.length}${c.reset} messages` +
       (unreadCount > 0 ? ` (${c.red}${c.bold}${unreadCount} unread${c.reset})` : "")
@@ -224,7 +246,7 @@ export async function mailRead(
   options: { json?: boolean }
 ): Promise<void> {
   const data = (await outlookGet(
-    `/messages/${messageId}?$select=Subject,From,ToRecipients,ReceivedDateTime,Body,IsRead,HasAttachments,Importance`
+    `/messages/${messageId}?$select=Subject,From,ToRecipients,ReceivedDateTime,Body,IsRead,IsDraft,HasAttachments,Importance`
   )) as MailMessage;
 
   if (options.json) {
@@ -239,6 +261,9 @@ export async function mailRead(
     .map((r) => r.EmailAddress?.Name ?? r.EmailAddress?.Address)
     .join(", ");
 
+  if (data.IsDraft) {
+    console.log(`${DRAFT_BADGE} ${c.yellow}未送信の下書きです${c.reset}`);
+  }
   console.log(`${c.bold}Subject:${c.reset} ${data.Subject}`);
   console.log(`${c.bold}From:${c.reset}    ${c.green}${from}${c.reset}`);
   console.log(`${c.bold}To:${c.reset}      ${to}`);
@@ -335,7 +360,7 @@ export async function mailSearch(
   const pageSize = options.pageSize ?? 10;
 
   const data = (await outlookGet(
-    `/messages?$search="${encodeURIComponent(query)}"&$top=${pageSize}&$select=Subject,From,ReceivedDateTime,IsRead,BodyPreview`
+    `/messages?$search="${encodeURIComponent(query)}"&$top=${pageSize}&$select=Subject,From,ToRecipients,ReceivedDateTime,IsRead,IsDraft,BodyPreview`
   )) as ODataResponse<MailMessage>;
 
   printAccountHeader();
@@ -348,14 +373,15 @@ export async function mailSearch(
 
   for (const mail of data.value) {
     const sid = shortId(mail.Id);
-    const from = mail.From?.EmailAddress?.Name ?? mail.From?.EmailAddress?.Address ?? "unknown";
+    const from = correspondentLabel(mail);
     const time = formatTime(mail.ReceivedDateTime);
     const subject = mail.Subject ?? "(no subject)";
-    const unread = !mail.IsRead;
+    const unread = !mail.IsRead && !mail.IsDraft;
+    const draft = mail.IsDraft ? ` ${DRAFT_BADGE}` : "";
     const preview = (mail.BodyPreview ?? "").replace(/\r?\n/g, " ").slice(0, 70);
     const marker = unread ? `${c.red}*${c.reset}` : " ";
 
-    console.log(`${marker} ${c.yellow}${sid}${c.reset} ${c.bold}${subject}${c.reset}`);
+    console.log(`${marker} ${c.yellow}${sid}${c.reset} ${c.bold}${subject}${c.reset}${draft}`);
     console.log(`  ${c.green}${from}${c.reset} ${c.dim}(${time})${c.reset}`);
     console.log(`  ${c.dim}${preview}${c.reset}`);
     console.log();
@@ -456,7 +482,9 @@ export async function mailDraft(options: {
   cc?: string[];
   importance?: string;
   html?: boolean;
+  attach?: string[];
 }): Promise<void> {
+  const attachments = loadLocalAttachments(options.attach ?? []);
   const toRecipients = options.to.map(parseRecipient);
   const ccRecipients = (options.cc ?? []).map(parseRecipient);
 
@@ -499,9 +527,7 @@ export async function mailCompose(options: {
   cc?: string[];
   importance?: string;
   html?: boolean;
-  attach?: string[];
 }): Promise<void> {
-  const attachments = loadLocalAttachments(options.attach ?? []);
   const toRecipients = options.to.map(parseRecipient);
   const ccRecipients = (options.cc ?? []).map(parseRecipient);
 

@@ -106,6 +106,8 @@ ms-cli mail read <message-id> --json       # JSON出力
 
 `mail list` や `mail search` の出力に含まれる `id:` をそのまま使う。
 
+未送信の下書きは `mail list` / `mail search` / `mail read` で `DRAFT` 印が付き、差出人の代わりに「→ 宛先」が出る。印のない自分発のメールは送信済み。
+
 ### メール検索
 ```bash
 ms-cli mail search "キーワード"              # 10件

@@ -141,7 +141,7 @@ async function ensureToken(): Promise<void> {
   process.exit(1);
 }
 
-program.name("ms-cli").description("Teams Internal API CLI").version("0.5.0");
+program.name("ms-cli").description("Teams Internal API CLI").version("0.6.0");
 
 // --- auth ---
 const auth = program.command("auth").description("Token management");
