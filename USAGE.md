@@ -118,6 +118,7 @@ ms-cli mail draft --to user@example.com -s "件名" -b "本文"
 ms-cli mail draft --to user@example.com --cc boss@example.com -s "件名" -b "本文"
 ms-cli mail draft --to user@example.com -s "件名" -b "<p>HTML本文</p>" --html
 ms-cli mail draft --to user@example.com -s "件名" -b "本文" --importance High
+ms-cli mail draft --to user@example.com -s "件名" -b "本文" --attach a.pdf b.xlsx  # 添付（1件150MBまで）
 ```
 
 下書きフォルダの確認: `ms-cli mail list -f drafts`
@@ -126,6 +127,7 @@ ms-cli mail draft --to user@example.com -s "件名" -b "本文" --importance Hig
 ```bash
 ms-cli mail reply <message-id> -b "返信本文"          # 全員返信（デフォルト）
 ms-cli mail reply <message-id> -b "返信本文" --no-all # 送信者のみに返信
+ms-cli mail reply <message-id> -b "返信本文" --attach a.pdf  # 添付つき
 ```
 
 件名 (`RE: ...`)・宛先・引用本文は自動セット。作成後 `mail send <id>` で送信。

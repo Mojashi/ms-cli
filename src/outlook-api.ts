@@ -1,6 +1,6 @@
 import { execSync } from "child_process";
-import { writeFileSync, mkdirSync } from "fs";
-import { join } from "path";
+import { writeFileSync, mkdirSync, readFileSync, statSync } from "fs";
+import { join, basename, resolve } from "path";
 import { loadConfig, saveConfig } from "./config.js";
 import { shortId, registerIds } from "./id-map.js";
 import { ensureGraphToken } from "./sharepoint-api.js";
@@ -366,6 +366,89 @@ export async function mailSearch(
 
 // --- Mail Draft ---
 
+// 1リクエストで送れる添付の上限（Outlook REST の約4MB制限に base64 膨張 4/3 を加味）。超えるものはアップロードセッションで分割送信する
+const MAX_INLINE_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+// Outlook の添付ファイル1件あたりの上限
+const MAX_ATTACHMENT_BYTES = 150 * 1024 * 1024;
+// アップロードセッションのチャンク（Graph 推奨の 320KiB の倍数、1リクエスト 4MB 未満）
+const UPLOAD_CHUNK_BYTES = 320 * 1024 * 10;
+
+interface LocalAttachment {
+  name: string;
+  bytes: Buffer;
+}
+
+/** 下書きを作る前に全ファイルを読み込み・検証する（途中で失敗して半端な下書きを残さないため） */
+function loadLocalAttachments(paths: string[]): LocalAttachment[] {
+  return paths.map((p) => {
+    const full = resolve(p);
+    const st = statSync(full);
+    if (!st.isFile()) throw new Error(`Not a file: ${full}`);
+    if (st.size > MAX_ATTACHMENT_BYTES) {
+      throw new Error(
+        `Attachment too large (${(st.size / 1024 / 1024).toFixed(1)}MB > 150MB): ${full}. SharePoint にアップして共有リンクを本文に貼ってください`
+      );
+    }
+    return { name: basename(full), bytes: readFileSync(full) };
+  });
+}
+
+async function attachInline(draftId: string, a: LocalAttachment): Promise<void> {
+  await outlookPost(`/messages/${draftId}/attachments`, {
+    "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+    Name: a.name,
+    ContentBytes: a.bytes.toString("base64"),
+  });
+}
+
+/** 3MB超の添付: Graph のアップロードセッションを作り、チャンクごとに PUT する */
+async function attachViaUploadSession(draftId: string, a: LocalAttachment): Promise<void> {
+  const token = await ensureGraphToken();
+  const res = await fetch(
+    `https://graph.microsoft.com/v1.0/me/messages/${draftId}/attachments/createUploadSession`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        AttachmentItem: { attachmentType: "file", name: a.name, size: a.bytes.length },
+      }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`createUploadSession failed ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+  const { uploadUrl } = (await res.json()) as { uploadUrl: string };
+
+  const total = a.bytes.length;
+  for (let start = 0; start < total; start += UPLOAD_CHUNK_BYTES) {
+    const end = Math.min(start + UPLOAD_CHUNK_BYTES, total);
+    // uploadUrl は自身に認可情報を含むため Authorization ヘッダは付けない（付けると 401 になる）
+    const put = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(end - start),
+        "Content-Range": `bytes ${start}-${end - 1}/${total}`,
+      },
+      body: new Uint8Array(a.bytes.subarray(start, end)),
+    });
+    if (!put.ok) {
+      throw new Error(`Attachment chunk upload failed ${put.status} at ${start}/${total}: ${(await put.text()).slice(0, 300)}`);
+    }
+  }
+}
+
+async function attachToDraft(draftId: string, attachments: LocalAttachment[]): Promise<void> {
+  for (const a of attachments) {
+    if (a.bytes.length <= MAX_INLINE_ATTACHMENT_BYTES) {
+      await attachInline(draftId, a);
+    } else {
+      await attachViaUploadSession(draftId, a);
+    }
+    console.log(`${c.bold}Attached:${c.reset} ${a.name} (${(a.bytes.length / 1024).toFixed(0)}KB)`);
+  }
+}
+
 export async function mailDraft(options: {
   subject: string;
   body: string;
@@ -387,6 +470,7 @@ export async function mailDraft(options: {
   if (options.importance) payload.Importance = options.importance;
 
   const data = (await outlookPost("/messages", payload)) as MailMessage;
+  await attachToDraft(data.Id, attachments);
 
   console.log(`${c.green}Draft created.${c.reset}`);
   console.log(`${c.bold}Subject:${c.reset} ${data.Subject}`);
@@ -415,7 +499,9 @@ export async function mailCompose(options: {
   cc?: string[];
   importance?: string;
   html?: boolean;
+  attach?: string[];
 }): Promise<void> {
+  const attachments = loadLocalAttachments(options.attach ?? []);
   const toRecipients = options.to.map(parseRecipient);
   const ccRecipients = (options.cc ?? []).map(parseRecipient);
 
@@ -453,8 +539,9 @@ async function outlookPatch(path: string, body: unknown): Promise<unknown> {
 
 export async function mailReply(
   messageId: string,
-  options: { body: string; all?: boolean }
+  options: { body: string; all?: boolean; attach?: string[] }
 ): Promise<void> {
+  const attachments = loadLocalAttachments(options.attach ?? []);
   const action = options.all ? "createreplyall" : "createreply";
   // Create reply draft first
   const draft = (await outlookPost(`/messages/${messageId}/${action}`, {})) as MailMessage;
@@ -468,6 +555,7 @@ export async function mailReply(
   const data = (await outlookPatch(`/messages/${draft.Id}`, {
     Body: { ContentType: "HTML", Content: newContent },
   })) as MailMessage;
+  await attachToDraft(draft.Id, attachments);
 
   console.log(`${c.green}Reply draft created.${c.reset}`);
   console.log(`${c.bold}Subject:${c.reset} ${data.Subject}`);

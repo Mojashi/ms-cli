@@ -309,8 +309,10 @@ mail
   .option("--cc <addrs...>", "CC recipients")
   .option("--html", "Body is HTML")
   .option("--importance <level>", "Normal, Low, or High")
+  .option("--attach <paths...>", "Local files to attach (each ≤150MB)")
   .action(async (opts) => {
     await mailDraft({
+      attach: opts.attach,
       to: opts.to,
       subject: opts.subject,
       body: opts.body,
@@ -349,8 +351,9 @@ mail
   .description("Create a reply draft (reply-all by default)")
   .requiredOption("-b, --body <body>", "Reply body text")
   .option("--no-all", "Reply to sender only (default: reply all)")
+  .option("--attach <paths...>", "Local files to attach (each ≤150MB)")
   .action(async (id: string, opts) => {
-    await mailReply(resolveId(id), { body: opts.body, all: opts.all });
+    await mailReply(resolveId(id), { body: opts.body, all: opts.all, attach: opts.attach });
   });
 
 mail
