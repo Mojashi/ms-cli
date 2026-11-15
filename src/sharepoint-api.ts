@@ -256,7 +256,7 @@ export async function spFiles(
   options: { path?: string; pageSize?: number; json?: boolean }
 ): Promise<void> {
   const pageSize = options.pageSize ?? 30;
-  const itemPath = options.path ? `:/${encodeURIComponent(options.path)}:` : "/root";
+  const itemPath = options.path ? `/root:/${encPath(options.path)}:` : "/root";
 
   const data = (await graphGet(
     `/drives/${encodeURIComponent(driveId)}${itemPath}/children?$top=${pageSize}&$orderby=name`
